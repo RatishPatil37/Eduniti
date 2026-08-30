@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback, memo } from 'react';
+import React, { useState, useEffect, useRef, useCallback, memo, useMemo } from 'react';
 import {
   BookOpen, Sparkles, FileText, TrendingUp, GitFork, Calendar,
   Send, CheckCircle2, Clock, ChevronRight, BarChart3, Award,
@@ -9,10 +9,11 @@ import {
   AlignLeft, Timer, Map, SplitSquareHorizontal, X, Menu,
   PanelLeftClose, PanelLeft, FileUp, Eye, MoreHorizontal,
   Layers, Hash, Activity, Star, ArrowLeft, Play, Pause, RotateCcw,
-  LogOut, User
+  LogOut, User, Maximize2, Minimize2
 } from 'lucide-react';
 import mermaid from 'mermaid';
 import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
 import 'katex/dist/katex.min.css';
@@ -24,15 +25,17 @@ mermaid.initialize({
   startOnLoad: false,
   theme: 'dark',
   securityLevel: 'loose',
+  fontFamily: 'Inter, system-ui, -apple-system, sans-serif',
   themeVariables: {
     darkMode: true,
-    background: '#09090B',
-    primaryColor: '#3F3F46',
+    background: '#0C0C0E',
+    primaryColor: '#18181B',
     primaryTextColor: '#FAFAFA',
-    primaryBorderColor: '#52525B',
+    primaryBorderColor: '#3F3F46',
     lineColor: '#A1A1AA',
-    secondaryColor: '#18181B',
-    tertiaryColor: '#27272A'
+    secondaryColor: '#121215',
+    tertiaryColor: '#27272A',
+    fontSize: '13px'
   }
 });
 
@@ -42,49 +45,225 @@ const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:8000';
 // PURE UTILITY & SUBCOMPONENTS (Defined outside to avoid unmounting)
 // ============================================================
 
-// Mermaid renderer helper — handles ```mermaid blocks
+// Sanitizes Mermaid code: auto-quotes unquoted bracket labels containing special characters
+function sanitizeMermaid(code) {
+  if (!code) return '';
+  let sanitized = code.trim();
+  
+  // Ensure diagram starts with standard definition
+  if (!sanitized.startsWith('flowchart') && !sanitized.startsWith('graph') && !sanitized.startsWith('sequenceDiagram') && !sanitized.startsWith('classDiagram')) {
+    sanitized = `flowchart TD\n${sanitized}`;
+  }
+
+  // Quote unquoted brackets containing special characters (&, _, +, -, etc.)
+  // e.g. A[Input x_t & h_{t-1}] -> A["Input x_t & h_{t-1}"]
+  sanitized = sanitized.replace(/(\w+)\s*\[([^"\]]+?)\]/g, (match, id, text) => {
+    if (text.startsWith('"') && text.endsWith('"')) return match;
+    return `${id}["${text.replace(/"/g, "'")}"]`;
+  });
+
+  return sanitized;
+}
+
+// Mermaid renderer helper — handles ```mermaid blocks with Claude-Style Artifact Modal
 const MermaidBlock = memo(function MermaidBlock({ code }) {
   const ref = useRef(null);
+  const modalRef = useRef(null);
+  const [svgContent, setSvgContent] = useState('');
+  const [error, setError] = useState(false);
+  const [isModalOpen, setIsModalOpen] = useState(false);
+  const [copied, setCopied] = useState(false);
+
+  const sanitizedCode = useMemo(() => sanitizeMermaid(code), [code]);
+
   useEffect(() => {
-    if (!ref.current) return;
     const id = `mg-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    mermaid.render(id, code)
-      .then(({ svg }) => { if (ref.current) ref.current.innerHTML = svg; })
-      .catch(() => { if (ref.current) ref.current.innerHTML = `<pre style="font-size:11px;color:#FCA5A5;white-space:pre-wrap">${code}</pre>`; });
-  }, [code]);
+    mermaid.render(id, sanitizedCode)
+      .then(({ svg }) => {
+        setSvgContent(svg);
+        setError(false);
+      })
+      .catch(() => {
+        setError(true);
+      });
+  }, [sanitizedCode]);
+
+  useEffect(() => {
+    if (ref.current && svgContent) {
+      ref.current.innerHTML = svgContent;
+    }
+  }, [svgContent]);
+
+  useEffect(() => {
+    if (modalRef.current && svgContent) {
+      modalRef.current.innerHTML = svgContent;
+    }
+  }, [svgContent, isModalOpen]);
+
+  const handleCopy = () => {
+    navigator.clipboard.writeText(code);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
   return (
-    <div className="mermaid-wrap">
-      <div className="mermaid-header">
-        <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-          <GitFork size={13} /> Architecture Diagram
-        </span>
-        <button className="btn btn-ghost btn-icon-square" onClick={() => navigator.clipboard.writeText(code)} title="Copy code">
-          <Copy size={13} />
-        </button>
-      </div>
-      <div className="mermaid-body" ref={ref}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: 'var(--text-muted)', fontSize: '0.78rem' }}>
-          <RefreshCw size={14} className="animate-spin" /> Rendering diagram...
+    <>
+      <div className="mermaid-wrap">
+        <div className="mermaid-header">
+          <span style={{ display: 'flex', alignItems: 'center', gap: 6, color: '#FAFAFA', fontWeight: 600 }}>
+            <GitFork size={14} style={{ color: '#38BDF8' }} /> Architecture Diagram
+          </span>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <button className="btn btn-ghost btn-icon-square" onClick={() => setIsModalOpen(true)} title="Expand Fullscreen View (Claude Artifact)">
+              <Maximize2 size={13} />
+            </button>
+            <button className="btn btn-ghost btn-icon-square" onClick={handleCopy} title="Copy Mermaid Code">
+              {copied ? <Check size={13} style={{ color: '#34D399' }} /> : <Copy size={13} />}
+            </button>
+          </div>
+        </div>
+        <div className="mermaid-body" ref={ref}>
+          {error ? (
+            <pre style={{ fontSize: '11px', color: '#FCA5A5', whiteSpace: 'pre-wrap', textAlign: 'left' }}>{code}</pre>
+          ) : !svgContent ? (
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, color: 'var(--text-muted)', fontSize: '0.80rem' }}>
+              <RefreshCw size={14} className="animate-spin" /> Rendering diagram...
+            </div>
+          ) : null}
         </div>
       </div>
-    </div>
+
+      {/* Claude-Style Artifact Modal Viewer */}
+      {isModalOpen && (
+        <div className="mermaid-modal-backdrop" onClick={() => setIsModalOpen(false)}>
+          <div className="mermaid-modal-content" onClick={e => e.stopPropagation()}>
+            <div className="mermaid-modal-header">
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <GitFork size={16} style={{ color: '#38BDF8' }} />
+                <span style={{ fontSize: '0.94rem', fontWeight: 600, color: '#FAFAFA' }}>System Architecture & Flowchart</span>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <button className="btn btn-ghost" onClick={handleCopy}>
+                  {copied ? <Check size={13} style={{ color: '#34D399' }} /> : <Copy size={13} />}
+                  <span>{copied ? 'Copied' : 'Copy Code'}</span>
+                </button>
+                <button className="btn btn-ghost btn-icon-square" onClick={() => setIsModalOpen(false)} title="Close">
+                  <X size={15} />
+                </button>
+              </div>
+            </div>
+            <div className="mermaid-modal-body" ref={modalRef}>
+              {!svgContent && <div style={{ color: '#71717A' }}>Loading diagram...</div>}
+            </div>
+          </div>
+        </div>
+      )}
+    </>
   );
 });
 
-// Gold-standard math renderer: react-markdown + remark-math + rehype-katex
-// Handles: $$display math$$, $inline math$, mermaid blocks, code blocks
+// Normalizes LaTeX math, single dollar signs, and Markdown GFM tables
+function normalizeMarkdown(rawText) {
+  if (!rawText) return '';
+
+  let text = rawText;
+
+  // 1. Fix single-line concatenated table rows (e.g. "| a | b | | --- | --- | | c | d |" -> "|\n|")
+  text = text.replace(/\|\s*\|\s*(?=[^:\n|]*[:\w-])/g, '|\n|');
+
+  // 2. Fix broken LaTeX with newlines before closing dollars (e.g. "$x \in R^d\n$, the encoder" -> "$x \in R^d$, the encoder")
+  text = text.replace(/\$([^$\n]+?)\n\s*(\$,|\$\.|\$\:|\$)/g, (match, expr, trailing) => {
+    const punct = trailing.startsWith('$') ? trailing.slice(1) : trailing;
+    return `$${expr.trim()}$${punct ? punct : ''}`;
+  });
+
+  // Fix "$formula\n$" -> "$$formula$$"
+  text = text.replace(/\$([^\n$]+?)\n\s*\$/g, (m, g1) => `\n\n$$\n${g1.trim()}\n$$\n\n`);
+
+  // 3. Fix split dollar signs within empty lines ("$\n$" or "$\n\n$")
+  text = text.replace(/\$\s*\n+\s*\$/g, '');
+
+  // 4. Remove standalone empty math blocks ($$$$, $$ $$, or consecutive standalone $$ lines)
+  text = text.replace(/\$\$\s*\$\$/g, '');
+  
+  // Clean line-by-line empty math artifacts
+  const rawLines = text.split('\n');
+  const cleanedMathLines = [];
+  for (let i = 0; i < rawLines.length; i++) {
+    const line = rawLines[i].trim();
+    const nextLine = (rawLines[i + 1] || '').trim();
+    // If this line is just '$$' and next line is just '$$', skip both
+    if (line === '$$' && nextLine === '$$') {
+      i++; // skip next line as well
+      continue;
+    }
+    // If line is just empty math '$' or '$$' with nothing inside
+    if (line === '$$$$' || line === '$$ $$' || line === '$$') {
+      const prevLine = (rawLines[i - 1] || '').trim();
+      if ((prevLine === '' || prevLine === '$$') && (nextLine === '' || nextLine === '$$')) {
+        continue;
+      }
+    }
+    cleanedMathLines.push(rawLines[i]);
+  }
+  text = cleanedMathLines.join('\n');
+
+  // 5. Fix table rows broken by multi-line cells
+  const lines = text.split('\n');
+  const normalizedLines = [];
+  let inTable = false;
+
+  for (let i = 0; i < lines.length; i++) {
+    let line = lines[i];
+    const isTableSeparator = /^\|?\s*:?-+:?\s*\|/.test(line.trim());
+    const isTableLine = line.trim().startsWith('|') && line.trim().endsWith('|');
+
+    if (isTableSeparator || isTableLine) {
+      inTable = true;
+      normalizedLines.push(line);
+    } else if (inTable && (line.trim().startsWith('$') || line.trim().includes('|')) && normalizedLines.length > 0) {
+      const prevLine = normalizedLines[normalizedLines.length - 1];
+      if (prevLine.trim().endsWith('|')) {
+        normalizedLines[normalizedLines.length - 1] = `${prevLine.slice(0, -1)} ${line.trim()} |`;
+      } else {
+        normalizedLines[normalizedLines.length - 1] += ` ${line.trim()}`;
+      }
+    } else {
+      inTable = false;
+      normalizedLines.push(line);
+    }
+  }
+
+  text = normalizedLines.join('\n');
+
+  // 6. Ensure $$ block math has surrounding blank lines for clean KaTeX display
+  text = text
+    .replace(/([^\n])\$\$/g, '$1\n\n$$$$')
+    .replace(/\$\$([^\n])/g, '$$$$\n\n$1');
+
+  // 7. Clean any remaining consecutive empty lines
+  text = text.replace(/\n{3,}/g, '\n\n');
+
+  return text;
+}
+
+// Gold-standard math & table renderer: react-markdown + remark-gfm + remark-math + rehype-katex
+// Handles: GFM tables, $$display math$$, $inline math$, mermaid blocks, code blocks
 const RenderMarkdown = memo(function RenderMarkdown({ text }) {
   if (!text) return null;
 
-  // Pre-process: extract mermaid blocks before react-markdown
+  // 1. Text normalization:
+  const cleanedText = normalizeMarkdown(text);
+
+  // 2. Pre-process: extract mermaid blocks before react-markdown
   const mermaidBlocks = [];
-  const processedText = text.replace(/```mermaid([\s\S]*?)```/g, (_, code) => {
+  const processedText = cleanedText.replace(/```mermaid([\s\S]*?)```/g, (_, code) => {
     const idx = mermaidBlocks.length;
     mermaidBlocks.push(code.trim());
     return `:::mermaid-${idx}:::`;
   });
 
-  // Custom components for react-markdown
+  // 3. Custom high-end components for react-markdown
   const components = {
     // Render mermaid placeholder lines
     p({ children }) {
@@ -94,43 +273,46 @@ const RenderMarkdown = memo(function RenderMarkdown({ text }) {
         const code = mermaidBlocks[parseInt(match[1])];
         return code ? <MermaidBlock code={code} /> : null;
       }
-      return <p>{children}</p>;
+      return <p style={{ margin: '0.6rem 0', lineHeight: 1.7 }}>{children}</p>;
     },
     code({ inline, className, children }) {
       const lang = (className || '').replace('language-', '');
       const raw = String(children).replace(/\n$/, '');
       if (!inline) {
         return (
-          <pre className="font-mono" style={{ background: '#18181B', border: '1px solid #27272A', borderRadius: 8, padding: '1rem', overflowX: 'auto', fontSize: '0.8rem' }}>
+          <pre className="font-mono" style={{ background: '#0C0C0E', border: '1px solid #27272A', borderRadius: 8, padding: '1rem', overflowX: 'auto', fontSize: '0.84rem', margin: '0.85rem 0' }}>
             <code className={className}>{raw}</code>
           </pre>
         );
       }
-      return <code style={{ background: '#27272A', padding: '0.1em 0.35em', borderRadius: 4, fontSize: '0.85em', fontFamily: 'JetBrains Mono, monospace' }}>{raw}</code>;
+      return <code style={{ background: '#27272A', padding: '0.1em 0.35em', borderRadius: 4, fontSize: '0.86em', fontFamily: 'JetBrains Mono, monospace' }}>{raw}</code>;
     },
-    h1: ({ children }) => <h1 style={{ fontSize: '1.4rem', fontWeight: 700, margin: '1.25rem 0 0.5rem', color: '#FAFAFA', letterSpacing: '-0.02em' }}>{children}</h1>,
-    h2: ({ children }) => <h2 style={{ fontSize: '1.15rem', fontWeight: 600, margin: '1.25rem 0 0.5rem', color: '#FAFAFA', letterSpacing: '-0.01em', borderBottom: '1px solid #27272A', paddingBottom: '0.375rem' }}>{children}</h2>,
-    h3: ({ children }) => <h3 style={{ fontSize: '1rem', fontWeight: 600, margin: '1rem 0 0.375rem', color: '#E4E4E7' }}>{children}</h3>,
-    ul: ({ children }) => <ul style={{ paddingLeft: '1.5rem', margin: '0.5rem 0', lineHeight: 1.7 }}>{children}</ul>,
-    ol: ({ children }) => <ol style={{ paddingLeft: '1.5rem', margin: '0.5rem 0', lineHeight: 1.7 }}>{children}</ol>,
-    li: ({ children }) => <li style={{ marginBottom: '0.25rem', color: '#D4D4D8' }}>{children}</li>,
+    h1: ({ children }) => <h1 style={{ fontSize: '1.40rem', fontWeight: 700, margin: '1.30rem 0 0.5rem', color: '#FAFAFA', letterSpacing: '-0.02em' }}>{children}</h1>,
+    h2: ({ children }) => <h2 style={{ fontSize: '1.18rem', fontWeight: 600, margin: '1.30rem 0 0.5rem', color: '#FAFAFA', letterSpacing: '-0.01em', borderBottom: '1px solid #27272A', paddingBottom: '0.40rem' }}>{children}</h2>,
+    h3: ({ children }) => <h3 style={{ fontSize: '1.02rem', fontWeight: 600, margin: '1.10rem 0 0.40rem', color: '#E4E4E7' }}>{children}</h3>,
+    ul: ({ children }) => <ul style={{ paddingLeft: '1.5rem', margin: '0.6rem 0', lineHeight: 1.75 }}>{children}</ul>,
+    ol: ({ children }) => <ol style={{ paddingLeft: '1.5rem', margin: '0.6rem 0', lineHeight: 1.75 }}>{children}</ol>,
+    li: ({ children }) => <li style={{ marginBottom: '0.35rem', color: '#D4D4D8' }}>{children}</li>,
     blockquote: ({ children }) => (
-      <blockquote style={{ borderLeft: '3px solid #3F3F46', paddingLeft: '1rem', margin: '0.75rem 0', color: '#71717A', fontStyle: 'italic' }}>{children}</blockquote>
+      <blockquote style={{ borderLeft: '3px solid #3F3F46', paddingLeft: '1rem', margin: '0.85rem 0', color: '#71717A', fontStyle: 'italic' }}>{children}</blockquote>
     ),
     table: ({ children }) => (
-      <div style={{ overflowX: 'auto', margin: '1rem 0' }}>
-        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.875rem' }}>{children}</table>
+      <div style={{ overflowX: 'auto', margin: '1.35rem 0', borderRadius: '8px', border: '1px solid #27272A', background: '#121215' }}>
+        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.88rem', textAlign: 'left' }}>{children}</table>
       </div>
     ),
-    th: ({ children }) => <th style={{ padding: '0.5rem 0.75rem', borderBottom: '1px solid #3F3F46', textAlign: 'left', color: '#FAFAFA', fontWeight: 600 }}>{children}</th>,
-    td: ({ children }) => <td style={{ padding: '0.5rem 0.75rem', borderBottom: '1px solid #27272A', color: '#D4D4D8' }}>{children}</td>,
+    thead: ({ children }) => <thead style={{ background: '#18181B', borderBottom: '2px solid #3F3F46' }}>{children}</thead>,
+    tbody: ({ children }) => <tbody>{children}</tbody>,
+    tr: ({ children }) => <tr style={{ borderBottom: '1px solid #27272A' }}>{children}</tr>,
+    th: ({ children }) => <th style={{ padding: '0.65rem 0.90rem', color: '#FAFAFA', fontWeight: 600, borderRight: '1px solid #27272A' }}>{children}</th>,
+    td: ({ children }) => <td style={{ padding: '0.65rem 0.90rem', color: '#D4D4D8', borderRight: '1px solid #27272A', lineHeight: 1.55 }}>{children}</td>,
     strong: ({ children }) => <strong style={{ fontWeight: 600, color: '#FAFAFA' }}>{children}</strong>,
   };
 
   return (
     <div className="answer-markdown">
       <ReactMarkdown
-        remarkPlugins={[remarkMath]}
+        remarkPlugins={[[remarkMath, { singleDollarTextMath: true }], remarkGfm]}
         rehypePlugins={[[rehypeKatex, { throwOnError: false, strict: false }]]}
         components={components}
       >
@@ -209,8 +391,9 @@ function SpotlightOverlay({ onClose, onSelect }) {
             <div key={i} className="spotlight-result-item" onClick={() => { onSelect?.(r); onClose(); }}>
               <div className="spotlight-result-icon" style={{
                 width: 32, height: 32, borderRadius: 8,
-                background: r.type === 'document' ? 'var(--indigo-dim)' : r.type === 'bank' ? 'var(--cyan-dim)' : 'var(--violet-dim)',
-                color: r.type === 'document' ? 'var(--indigo-light)' : r.type === 'bank' ? 'var(--cyan-light)' : 'var(--violet-light)',
+                background: '#18181B',
+                border: '1px solid #27272A',
+                color: '#FAFAFA',
                 display: 'flex', alignItems: 'center', justifyContent: 'center'
               }}>
                 {r.type === 'document' ? <FileText size={16} /> : r.type === 'bank' ? <BookMarked size={16} /> : <History size={16} />}
@@ -448,18 +631,18 @@ const ExamTimerWorkspace = memo(function ExamTimerWorkspace({ subject, toast }) 
 // NAVIGATION STRUCTURE
 // ============================================================
 const NAV_ITEMS = [
-  { id: 'qa',       label: 'Synthesize Answer', icon: Zap,          section: 'Core' },
-  { id: 'history',  label: 'Answer History',    icon: History,       section: 'Core' },
-  { id: 'vault',    label: 'Document Vault',    icon: FolderOpen,    section: 'Knowledge' },
-  { id: 'bank',     label: 'Question Bank',     icon: BookMarked,    section: 'Knowledge' },
-  { id: 'predict',  label: 'PYQ Predictor',     icon: TrendingUp,    section: 'Intelligence' },
-  { id: 'mock',     label: 'Mock Exam Paper',   icon: FileText,      section: 'Intelligence' },
-  { id: 'timer',    label: 'Exam Timer',        icon: Timer,         section: 'Intelligence' },
-  { id: 'graph',    label: 'Concept Graph',     icon: GitFork,       section: 'Intelligence' },
-  { id: 'syllabus', label: 'Syllabus Tracker',  icon: Map,           section: 'Intelligence' },
-  { id: 'planner',  label: 'Study Planner',     icon: Calendar,      section: 'Intelligence' },
-  { id: 'practice', label: 'Practice Arena',    icon: Award,         section: 'Training' },
-  { id: 'compare',  label: 'Comparison Mode',   icon: SplitSquareHorizontal, section: 'Training' },
+  { id: 'qa',       label: 'Synthesize Answer', icon: Zap,          color: '#38BDF8', section: 'Core' },
+  { id: 'history',  label: 'Answer History',    icon: History,       color: '#A78BFA', section: 'Core' },
+  { id: 'vault',    label: 'Document Vault',    icon: FolderOpen,    color: '#FBBF24', section: 'Knowledge' },
+  { id: 'bank',     label: 'Question Bank',     icon: BookMarked,    color: '#34D399', section: 'Knowledge' },
+  { id: 'predict',  label: 'PYQ Predictor',     icon: TrendingUp,    color: '#FB7185', section: 'Intelligence' },
+  { id: 'mock',     label: 'Mock Exam Paper',   icon: FileText,      color: '#818CF8', section: 'Intelligence' },
+  { id: 'timer',    label: 'Exam Timer',        icon: Timer,         color: '#22D3EE', section: 'Intelligence' },
+  { id: 'graph',    label: 'Concept Graph',     icon: GitFork,       color: '#C084FC', section: 'Intelligence' },
+  { id: 'syllabus', label: 'Syllabus Tracker',  icon: Map,           color: '#4ADE80', section: 'Intelligence' },
+  { id: 'planner',  label: 'Study Planner',     icon: Calendar,      color: '#60A5FA', section: 'Intelligence' },
+  { id: 'practice', label: 'Practice Arena',    icon: Award,         color: '#F59E0B', section: 'Training' },
+  { id: 'compare',  label: 'Comparison Mode',   icon: SplitSquareHorizontal, color: '#FB923C', section: 'Training' },
 ];
 
 const SECTIONS = ['Core', 'Knowledge', 'Intelligence', 'Training'];
@@ -1004,7 +1187,7 @@ export default function App() {
                     className={`nav-link-btn ${tab === n.id ? 'active' : ''}`}
                     onClick={() => { setTab(n.id); setMobileSidebarOpen(false); }}
                   >
-                    <span className="nav-btn-icon"><Icon size={16} /></span>
+                    <span className="nav-btn-icon" style={{ color: n.color }}><Icon size={16} /></span>
                     <span className="nav-btn-text">{n.label}</span>
                     {count > 0 && <span className="nav-btn-badge">{count}</span>}
                   </button>
@@ -1139,7 +1322,7 @@ export default function App() {
                 <div className="glass-panel-elevated" style={{ display: 'flex', flexDirection: 'column' }}>
                   <div className="answer-toolbar">
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                      <Sparkles size={16} style={{ color: 'var(--indigo-light)' }} />
+                      <Sparkles size={16} style={{ color: '#FAFAFA' }} />
                       <span style={{ fontSize: '0.86rem', fontWeight: 600 }}>
                         {qaLoading ? 'Synthesizing...' : qaResult ? `${targetMarks}-Mark Answer` : 'Generated Answer'}
                       </span>
@@ -1181,10 +1364,10 @@ export default function App() {
                       </div>
                     )}
                     {!qaLoading && !displayedAnswer && (
-                      <div className="empty-state">
-                        <div className="empty-icon"><Send size={24} /></div>
-                        <p style={{ fontSize: '0.88rem', fontWeight: 600 }}>Your synthesized answer will appear here</p>
-                        <p style={{ fontSize: '0.76rem', color: 'var(--text-muted)' }}>Grounded in your uploaded university course notes and PYQs</p>
+                      <div className="glass-panel-inset text-center text-xs text-muted" style={{ padding: 36, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 10 }}>
+                        <div className="empty-icon" style={{ width: 38, height: 38 }}><Send size={16} style={{ color: '#38BDF8' }} /></div>
+                        <p style={{ fontSize: '0.90rem', fontWeight: 600, color: '#FAFAFA' }}>Your synthesized answer will appear here</p>
+                        <p style={{ fontSize: '0.78rem', color: '#71717A' }}>Grounded in your uploaded university course notes and PYQs</p>
                       </div>
                     )}
                   </div>
@@ -1240,9 +1423,9 @@ export default function App() {
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                   {historyLoading && [1,2,3].map(i => <SkeletonCard key={i} lines={2} />)}
                   {!historyLoading && history.length === 0 && (
-                    <div className="empty-state glass-panel">
-                      <div className="empty-icon"><History size={24} /></div>
-                      <p className="text-sm text-muted">No answers synthesized yet</p>
+                    <div className="glass-panel-inset text-center text-xs text-muted" style={{ padding: 24, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8 }}>
+                      <History size={16} style={{ color: '#A78BFA' }} />
+                      <span>No answers synthesized yet — run your first query in Synthesize Answer</span>
                     </div>
                   )}
                   {history.map((item, idx) => (
@@ -1275,7 +1458,7 @@ export default function App() {
 
               <div className="glass-panel-elevated" style={{ padding: 22, marginBottom: 24 }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 14 }}>
-                  <UploadCloud size={18} style={{ color: 'var(--indigo-light)' }} />
+                  <UploadCloud size={18} style={{ color: '#FAFAFA' }} />
                   <span style={{ fontSize: '0.90rem', fontWeight: 700 }}>Upload University PDF</span>
                 </div>
                 <div
@@ -1288,7 +1471,7 @@ export default function App() {
                   <div className="dropzone-icon"><FileUp size={22} /></div>
                   {selectedFile ? (
                     <div>
-                      <p style={{ fontSize: '0.88rem', fontWeight: 600, color: 'var(--indigo-light)' }}>{selectedFile.name}</p>
+                      <p style={{ fontSize: '0.88rem', fontWeight: 600, color: '#FAFAFA' }}>{selectedFile.name}</p>
                       <p className="text-xs text-muted">{(selectedFile.size / 1024).toFixed(1)} KB</p>
                     </div>
                   ) : (
@@ -1313,7 +1496,7 @@ export default function App() {
                       <input className="input-field" type="number" placeholder="Optional" value={uploadModule} onChange={e => setUploadModule(e.target.value)} min={1} max={8} />
                     </div>
                     <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: '0.80rem', color: 'var(--text-secondary)', marginBottom: 6 }}>
-                      <input type="checkbox" checked={pinToVault} onChange={e => setPinToVault(e.target.checked)} style={{ accentColor: 'var(--indigo)' }} />
+                      <input type="checkbox" checked={pinToVault} onChange={e => setPinToVault(e.target.checked)} style={{ accentColor: '#FAFAFA' }} />
                       <Pin size={14} /> Pin to Vault
                     </label>
                     <button className="btn btn-primary" onClick={handleUpload} disabled={uploading}>
@@ -1416,9 +1599,9 @@ export default function App() {
                 {bankLoading && [1,2,3].map(i => <SkeletonCard key={i} lines={4} />)}
                 {!bankLoading && filteredBank.length === 0 && (
                   <div style={{ gridColumn: '1/-1' }}>
-                    <div className="empty-state glass-panel">
-                      <div className="empty-icon"><BookMarked size={24} /></div>
-                      <p className="text-sm text-muted">No questions saved yet — click bookmark on any synthesized answer</p>
+                    <div className="glass-panel-inset text-center text-xs text-muted" style={{ padding: 22, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8 }}>
+                      <BookMarked size={16} style={{ color: '#34D399' }} />
+                      <span>No questions saved yet — click bookmark on any synthesized answer</span>
                     </div>
                   </div>
                 )}
@@ -1649,7 +1832,7 @@ export default function App() {
                     setCompletedDays(updated);
                     localStorage.setItem('rad_plan_completed', JSON.stringify(updated));
                   }}>
-                    <div className="planner-day-num" style={{ background: done ? 'var(--emerald-dim)' : 'var(--indigo-dim)', color: done ? 'var(--emerald)' : 'var(--indigo-light)' }}>
+                    <div className="planner-day-num" style={{ background: done ? 'var(--emerald-dim)' : '#18181B', color: done ? 'var(--emerald-light)' : '#FAFAFA' }}>
                       {done ? <Check size={16} /> : `D${day.day}`}
                     </div>
                     <div style={{ flex: 1 }}>
@@ -1659,7 +1842,7 @@ export default function App() {
                       </div>
                       {day.tasks?.map((task, ti) => (
                         <div key={ti} className={`task-row ${done ? 'done' : ''}`}>
-                          <ChevronRight size={12} style={{ color: 'var(--indigo-light)', flexShrink: 0 }} />
+                          <ChevronRight size={12} style={{ color: '#71717A', flexShrink: 0 }} />
                           {task}
                         </div>
                       ))}
@@ -1722,9 +1905,10 @@ export default function App() {
                     )}
                   </div>
                 ) : (
-                  <div className="empty-state glass-panel">
-                    <div className="empty-icon"><Award size={24} /></div>
-                    <p className="text-sm text-muted">Submit your answer to see AI evaluation</p>
+                  <div className="glass-panel-inset text-center text-xs text-muted" style={{ padding: 36, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 10 }}>
+                    <div className="empty-icon" style={{ width: 38, height: 38 }}><Award size={16} style={{ color: '#F59E0B' }} /></div>
+                    <p style={{ fontSize: '0.88rem', fontWeight: 600, color: '#FAFAFA' }}>Submit your answer to see AI evaluation</p>
+                    <p style={{ fontSize: '0.78rem', color: '#71717A' }}>Receive automated mark breakdown and progressive hints</p>
                   </div>
                 )}
               </div>

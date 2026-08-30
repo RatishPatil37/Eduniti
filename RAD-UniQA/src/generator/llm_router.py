@@ -1,26 +1,19 @@
 """
 llm_router.py
-Responsibility: Intelligent, task-aware LLM routing and automatic fallback engine.
+Responsibility: Intelligent, task-aware LLM routing and automatic multi-tier fallback engine.
 
-Routing Strategy for <=5 Users (Maximum Reasoning & Depth):
-  10-mark / Complex Tasks (derivations, mock exams, concept graphs, diagrams):
-    1. Gemini 2.5 Flash   - "gemini-3.7-flash" tier, best reasoning + diagram quality
-    2. Groq Llama 3.3 70B - High-throughput fallback (14.4K RPD free)
-    3. Ollama local       - Offline fallback (unlimited, no internet needed)
-
-  2/5-mark / Fast Tasks (definitions, comparisons, quick Q&A):
-    1. Gemini 2.0 Flash Lite - "gemini-3.5-flash-lite" tier, 30 RPM / 1500 RPD
-    2. Groq Llama 3.3 70B    - Same model for consistency, ample free quota
-    3. Ollama local          - Offline fallback
-
-  Diagram/Architecture Questions (any marks):
-    Always routed to the BEST available model (Gemini 2.5 Flash -> Groq 3.3 70B -> Ollama).
-    These questions need the highest structural reasoning capability.
+Strict Fallback Hierarchy:
+  Tier 1: Gemini 3.7 Flash     (Primary for 10-mark & complex derivations)
+  Tier 2: Gemini 3.5 Flash     (Secondary high-reasoning Gemini fallback)
+  Tier 3: Gemini 3.5 Flash Lite (High-throughput 15 RPM / 500 RPD fallback)
+  Tier 4: Groq Llama 3.3 70B   (14.4K RPD free cloud fallback)
+  Tier 5: Ollama Local         (Offline local fallback)
 """
-import os
 import sys
+import time
 import logging
-from typing import Literal, Tuple, Any, Optional
+from typing import Literal, Tuple, Any, List, Dict, AsyncGenerator
+from langchain_core.messages import HumanMessage
 from src.config import settings
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -43,16 +36,6 @@ TaskType = Literal[
     "general_qa"            # Default query
 ]
 
-# ===========================================================================
-# Model Names (as used in the respective API)
-# ===========================================================================
-GEMINI_HIGH_MODEL = settings.GEMINI_MODEL       # gemini-3.7-flash (Best reasoning & derivations)
-GEMINI_FAST_MODEL = settings.GEMINI_FAST_MODEL  # gemini-3.5-flash-lite (High-throughput & fast responses)
-GROQ_MODEL_HIGH   = settings.GROQ_MODEL         # llama-3.3-70b-versatile
-GROQ_MODEL_FAST   = settings.GROQ_MODEL         # llama-3.3-70b-versatile
-OLLAMA_MODEL      = settings.OLLAMA_MODEL       # llama3:8b (Local)
-
-# High-complexity task categories that benefit from deeper reasoning
 HIGH_COMPLEXITY_TASKS = {
     "long_derivation",
     "mock_exam_generation",
@@ -61,92 +44,188 @@ HIGH_COMPLEXITY_TASKS = {
 }
 
 
-def resolve_optimal_provider(
+def get_ordered_llm_candidates(
     task: TaskType = "general_qa",
     target_marks: int = 10
-) -> Tuple[str, str]:
+) -> List[Dict[str, Any]]:
     """
-    Determines the best available LLM provider and model for the specific task.
+    Constructs an ordered chain of LLM candidates for automatic failover.
+    Hierarchy:
+      1. Gemini 3.7 Flash (Primary for 10m/complex) or Gemini 3.5 Flash Lite (for fast 2m)
+      2. Gemini 3.5 Flash (Secondary fallback)
+      3. Gemini 3.5 Flash Lite (High-throughput fallback)
+      4. Groq Llama 3.3 70B (Cloud fallback)
+      5. Ollama Llama 3.1 8B (Local offline fallback)
     """
     has_gemini = bool(settings.GEMINI_API_KEY and settings.GEMINI_API_KEY.strip())
     has_groq   = bool(settings.GROQ_API_KEY   and settings.GROQ_API_KEY.strip())
-
     is_complex = (task in HIGH_COMPLEXITY_TASKS) or (target_marks >= 10)
 
+    candidates = []
+
     if has_gemini:
-        model = GEMINI_HIGH_MODEL if is_complex else GEMINI_FAST_MODEL
-        return "gemini", model
+        if is_complex:
+            # Complex: 3.7 Flash -> 3.5 Flash -> 3.5 Flash Lite
+            candidates.append({"provider": "gemini", "model": settings.GEMINI_MODEL, "desc": "Gemini 3.7 Flash (Primary)"})
+            candidates.append({"provider": "gemini", "model": settings.GEMINI_SECONDARY_MODEL, "desc": "Gemini 3.5 Flash (Secondary)"})
+            candidates.append({"provider": "gemini", "model": settings.GEMINI_FAST_MODEL, "desc": "Gemini 3.5 Flash Lite (High-Throughput)"})
+        else:
+            # Fast: 3.5 Flash Lite -> 3.5 Flash -> 3.7 Flash
+            candidates.append({"provider": "gemini", "model": settings.GEMINI_FAST_MODEL, "desc": "Gemini 3.5 Flash Lite (Fast Primary)"})
+            candidates.append({"provider": "gemini", "model": settings.GEMINI_SECONDARY_MODEL, "desc": "Gemini 3.5 Flash (Secondary)"})
+            candidates.append({"provider": "gemini", "model": settings.GEMINI_MODEL, "desc": "Gemini 3.7 Flash (High Reasoning)"})
 
     if has_groq:
-        model = GROQ_MODEL_HIGH if is_complex else GROQ_MODEL_FAST
-        return "groq", model
+        candidates.append({"provider": "groq", "model": settings.GROQ_MODEL, "desc": "Groq Llama 3.3 70B (Cloud Fallback)"})
 
-    return "ollama", OLLAMA_MODEL
+    # Always append Ollama as final safety net
+    candidates.append({"provider": "ollama", "model": settings.OLLAMA_MODEL, "desc": "Ollama Local (Offline Fallback)"})
+
+    return candidates
 
 
-def get_llm_instance(
-    task: TaskType = "general_qa",
-    target_marks: int = 10,
-    temperature: float = 0.2
-) -> Tuple[Any, str, str]:
-    """
-    Instantiates and returns the LangChain chat model client with graceful fallback.
-    """
-    provider, model_name = resolve_optimal_provider(task, target_marks)
-
-    # -----------------------------------------------------------------------
-    # 1. Google Gemini (Cloud primary)
-    # -----------------------------------------------------------------------
+def _create_llm_client(provider: str, model_name: str, temperature: float = 0.2) -> Any:
+    """Instantiates a single LangChain LLM instance."""
     if provider == "gemini":
-        try:
-            from langchain_google_genai import ChatGoogleGenerativeAI
-            llm = ChatGoogleGenerativeAI(
-                model=model_name,
-                google_api_key=settings.GEMINI_API_KEY,
-                temperature=temperature,
-                convert_system_message_to_human=True
-            )
-            return llm, "gemini", model_name
-        except Exception as e:
-            logger.warning(f"Failed to initialize Gemini ({model_name}): {e}. Attempting Groq fallback...")
-            if settings.GROQ_API_KEY and settings.GROQ_API_KEY.strip():
-                provider = "groq"
-                model_name = GROQ_MODEL_HIGH if target_marks >= 10 else GROQ_MODEL_FAST
-            else:
-                provider = "ollama"
-                model_name = OLLAMA_MODEL
-
-    # -----------------------------------------------------------------------
-    # 2. Groq Cloud (Secondary high-throughput fallback)
-    # -----------------------------------------------------------------------
-    if provider == "groq":
-        try:
-            from langchain_groq import ChatGroq
-            llm = ChatGroq(
-                model=model_name,
-                groq_api_key=settings.GROQ_API_KEY,
-                temperature=temperature
-            )
-            return llm, "groq", model_name
-        except Exception as e:
-            logger.warning(f"Failed to initialize Groq ({model_name}): {e}. Falling back to Ollama local...")
-            provider = "ollama"
-            model_name = OLLAMA_MODEL
-
-    # -----------------------------------------------------------------------
-    # 3. Ollama (Local offline fallback)
-    # -----------------------------------------------------------------------
-    try:
+        from langchain_google_genai import ChatGoogleGenerativeAI
+        return ChatGoogleGenerativeAI(
+            model=model_name,
+            google_api_key=settings.GEMINI_API_KEY,
+            temperature=temperature,
+            convert_system_message_to_human=True
+        )
+    elif provider == "groq":
+        from langchain_groq import ChatGroq
+        return ChatGroq(
+            model=model_name,
+            groq_api_key=settings.GROQ_API_KEY,
+            temperature=temperature
+        )
+    elif provider == "ollama":
         from langchain_community.chat_models import ChatOllama
-        llm = ChatOllama(
+        return ChatOllama(
             model=model_name,
             base_url=settings.OLLAMA_BASE_URL,
             temperature=temperature
         )
-        return llm, "ollama", model_name
-    except Exception as e:
-        logger.error(f"All LLM providers failed (Gemini, Groq, Ollama): {e}")
-        raise RuntimeError(
-            "No functional LLM provider available. "
-            "Please provide a valid GEMINI_API_KEY, GROQ_API_KEY, or run `ollama serve`."
-        ) from e
+    else:
+        raise ValueError(f"Unknown provider: {provider}")
+
+
+async def execute_with_failover(
+    prompt: str,
+    task: TaskType = "general_qa",
+    target_marks: int = 10,
+    temperature: float = 0.2
+) -> Tuple[str, str, str]:
+    """
+    Executes an LLM call with automatic multi-tier failover.
+    Returns: (generated_text, active_provider, active_model)
+    """
+    candidates = get_ordered_llm_candidates(task, target_marks)
+    last_error = None
+
+    for idx, c in enumerate(candidates):
+        provider = c["provider"]
+        model = c["model"]
+        desc = c["desc"]
+        try:
+            print(f"🤖 [LLM ATTEMPT {idx + 1}/{len(candidates)}] Using {desc}...")
+            llm = _create_llm_client(provider, model, temperature)
+            response = await llm.ainvoke([HumanMessage(content=prompt)])
+
+            raw_content = response.content
+            if isinstance(raw_content, list):
+                text_parts = []
+                for part in raw_content:
+                    if isinstance(part, str):
+                        text_parts.append(part)
+                    elif isinstance(part, dict) and "text" in part:
+                        text_parts.append(part["text"])
+                    elif hasattr(part, "text"):
+                        text_parts.append(getattr(part, "text"))
+                    else:
+                        text_parts.append(str(part))
+                answer_text = "".join(text_parts)
+            else:
+                answer_text = str(raw_content)
+
+            if answer_text.strip():
+                print(f"✅ [LLM SUCCESS] Completed generation via {desc} ({len(answer_text)} chars)")
+                return answer_text, provider, model
+
+        except Exception as e:
+            error_str = str(e)
+            print(f"⚠️  [LLM FAILOVER] {desc} failed: {error_str[:160]}...")
+            last_error = e
+            continue
+
+    print(f"❌ [ALL LLMs FAILED] Last error: {last_error}")
+    raise RuntimeError(f"All LLM tiers failed. Last error: {last_error}")
+
+
+async def stream_with_failover(
+    prompt: str,
+    task: TaskType = "general_qa",
+    target_marks: int = 10,
+    temperature: float = 0.2
+) -> AsyncGenerator[Tuple[str, str, str], None]:
+    """
+    Streams tokens with automatic failover to the next candidate if the active LLM fails.
+    Yields tuples: (token_chunk, provider, model)
+    """
+    candidates = get_ordered_llm_candidates(task, target_marks)
+    last_error = None
+
+    for idx, c in enumerate(candidates):
+        provider = c["provider"]
+        model = c["model"]
+        desc = c["desc"]
+        try:
+            print(f"🌊 [STREAM ATTEMPT {idx + 1}/{len(candidates)}] Using {desc}...")
+            llm = _create_llm_client(provider, model, temperature)
+            received_any_token = False
+
+            async for chunk in llm.astream([HumanMessage(content=prompt)]):
+                token = ""
+                if hasattr(chunk, "content"):
+                    raw = chunk.content
+                    if isinstance(raw, str):
+                        token = raw
+                    elif isinstance(raw, list):
+                        for part in raw:
+                            if isinstance(part, str):
+                                token += part
+                            elif isinstance(part, dict) and "text" in part:
+                                token += part["text"]
+                if token:
+                    received_any_token = True
+                    yield (token, provider, model)
+
+            if received_any_token:
+                print(f"✅ [STREAM COMPLETE] Finished streaming via {desc}")
+                return
+
+        except Exception as e:
+            error_str = str(e)
+            print(f"⚠️  [STREAM FAILOVER] {desc} failed: {error_str[:160]}...")
+            last_error = e
+            continue
+
+    raise RuntimeError(f"All LLM streaming tiers failed. Last error: {last_error}")
+
+
+def resolve_optimal_provider(task: TaskType = "general_qa", target_marks: int = 10) -> Tuple[str, str]:
+    """Returns top candidate provider and model name."""
+    candidates = get_ordered_llm_candidates(task, target_marks)
+    if candidates:
+        return candidates[0]["provider"], candidates[0]["model"]
+    return "gemini", settings.GEMINI_MODEL
+
+
+def get_llm_instance(task: TaskType = "general_qa", target_marks: int = 10, temperature: float = 0.2) -> Tuple[Any, str, str]:
+    """Returns the primary LLM instance."""
+    candidates = get_ordered_llm_candidates(task, target_marks)
+    top = candidates[0]
+    llm = _create_llm_client(top["provider"], top["model"], temperature)
+    return llm, top["provider"], top["model"]

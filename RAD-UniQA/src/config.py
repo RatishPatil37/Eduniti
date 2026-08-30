@@ -10,23 +10,23 @@ class Settings(BaseSettings):
     OLLAMA_BASE_URL: str = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
     OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "llama3.1:8b-instruct-q5_K_M")
     
-    # Gemini API Configuration
+    # Gemini API Configuration (Strict 3-Tier Hierarchy: 3.7 Flash -> 3.5 Flash -> 3.5 Flash Lite)
     GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
     GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-3.7-flash")
+    GEMINI_SECONDARY_MODEL: str = os.getenv("GEMINI_SECONDARY_MODEL", "gemini-3.5-flash")
     GEMINI_FAST_MODEL: str = os.getenv("GEMINI_FAST_MODEL", "gemini-3.5-flash-lite")
     GEMINI_EMBED_MODEL: str = os.getenv("GEMINI_EMBED_MODEL", "models/gemini-embedding-2")
     
-    # Groq API Configuration
+    # Groq API Configuration (High-Throughput Cloud Fallback)
     GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "")
     GROQ_MODEL: str = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
     
     # Active model fallback string (used in health endpoint)
-    LLM_MODEL: str = os.getenv("LLM_MODEL", "llama3.1:8b-instruct-q5_K_M")
+    LLM_MODEL: str = os.getenv("LLM_MODEL", "gemini-3.7-flash")
     
     # Embedding config
     EMBED_PROVIDER: str = os.getenv("EMBED_PROVIDER", "gemini")
     EMBED_MODEL: str = os.getenv("EMBED_MODEL", "all-MiniLM-L6-v2")
-    # Reranker disabled — using lightweight RRF sort instead (~2ms vs 3-8s cross-encoder)
     RERANKER_MODEL: str = os.getenv("RERANKER_MODEL", "disabled")
     
     # Qdrant Database
@@ -36,8 +36,8 @@ class Settings(BaseSettings):
     # Chunking & Retrieval Parameters (optimized for speed)
     PARENT_CHUNK_SIZE: int = 1000
     CHILD_CHUNK_SIZE: int = 250
-    TOP_K_CANDIDATES: int = 12   # Reduced from 20 (less candidates = faster pipeline)
-    TOP_K_FINAL: int = 5          # Increased from 4 (better quality with lightweight reranker)
+    TOP_K_CANDIDATES: int = 12
+    TOP_K_FINAL: int = 5
     
     # Storage Paths
     BASE_DIR: Path = Path(__file__).resolve().parent.parent

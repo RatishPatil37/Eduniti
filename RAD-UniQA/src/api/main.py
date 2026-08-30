@@ -291,21 +291,32 @@ async def upload_pdf_endpoint(
     pin_to_vault: bool = Form(False)
 ):
     """Upload and ingest a university PDF into Qdrant & BM25 indices."""
-    if not file.filename.lower().endswith(".pdf"):
+    # Sanitize filename against path traversal attacks (e.g. '../../malicious.pdf')
+    safe_filename = Path(file.filename).name
+    if not safe_filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are supported.")
+
+    # Validate PDF magic bytes (%PDF-)
+    header = await file.read(5)
+    await file.seek(0)
+    if header != b"%PDF-":
+        raise HTTPException(status_code=400, detail="Invalid file format. File is not a valid PDF.")
 
     settings.RAW_DOCS_DIR.mkdir(parents=True, exist_ok=True)
     settings.PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
 
-    saved_path = settings.RAW_DOCS_DIR / file.filename
+    saved_path = (settings.RAW_DOCS_DIR / safe_filename).resolve()
+    if not saved_path.is_relative_to(settings.RAW_DOCS_DIR.resolve()):
+        raise HTTPException(status_code=400, detail="Invalid file path detected.")
+
     with open(saved_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
 
     try:
         print(f"\n=======================================================")
-        print(f"📄 [INGESTION] Received PDF: '{file.filename}' | Subject: '{subject}' | Module: {module_number or 'All'} | Pinned: {pin_to_vault}")
+        print(f"📄 [INGESTION] Received PDF: '{safe_filename}' | Subject: '{subject}' | Module: {module_number or 'All'} | Pinned: {pin_to_vault}")
         pages = parse_pdf_to_markdown(saved_path)
-        meta = extract_metadata_from_filename(file.filename, default_subject=subject)
+        meta = extract_metadata_from_filename(safe_filename, default_subject=subject)
         if module_number:
             meta["module_number"] = module_number
 
@@ -428,21 +439,22 @@ async def list_documents_endpoint():
 @app.delete("/api/v1/documents/{filename}")
 async def delete_document_endpoint(filename: str):
     """Delete a document from the vault, disk, BM25 index, and parent store."""
-    pdf_path = settings.RAW_DOCS_DIR / filename
-    if not pdf_path.exists():
-        raise HTTPException(status_code=404, detail=f"Document '{filename}' not found.")
+    safe_filename = Path(filename).name
+    pdf_path = (settings.RAW_DOCS_DIR / safe_filename).resolve()
+    if not pdf_path.is_relative_to(settings.RAW_DOCS_DIR.resolve()) or not pdf_path.exists():
+        raise HTTPException(status_code=404, detail=f"Document '{safe_filename}' not found.")
 
     # Remove from disk
     pdf_path.unlink()
 
     # Remove from vault metadata
-    app.state.vault_meta.pop(filename, None)
+    app.state.vault_meta.pop(safe_filename, None)
     _save_vault_metadata(app.state.vault_meta)
 
     # Remove from BM25 corpus
     app.state.bm25_corpus = [
         c for c in app.state.bm25_corpus
-        if c.get("metadata", {}).get("source") != filename
+        if c.get("metadata", {}).get("source") != safe_filename
     ]
     with open(settings.BM25_CORPUS_PATH, "w", encoding="utf-8") as f:
         json.dump(app.state.bm25_corpus, f, indent=2)
@@ -455,37 +467,65 @@ async def delete_document_endpoint(filename: str):
     # Remove from parent store
     app.state.parent_store = {
         k: v for k, v in app.state.parent_store.items()
-        if v.get("metadata", {}).get("source") != filename
+        if v.get("metadata", {}).get("source") != safe_filename
     }
     with open(settings.PARENT_STORE_PATH, "w", encoding="utf-8") as f:
         json.dump(app.state.parent_store, f, indent=2)
 
-    return {"status": "deleted", "filename": filename}
+    return {"status": "deleted", "filename": safe_filename}
 
 
 @app.post("/api/v1/documents/{filename}/pin")
 async def pin_document_endpoint(filename: str):
     """Pin a document to the Vault - it will survive server restarts."""
-    if filename not in app.state.vault_meta:
-        raise HTTPException(status_code=404, detail=f"Document '{filename}' not tracked in vault.")
-    app.state.vault_meta[filename]["pinned"] = True
+    safe_filename = Path(filename).name
+    if safe_filename not in app.state.vault_meta:
+        raise HTTPException(status_code=404, detail=f"Document '{safe_filename}' not tracked in vault.")
+    app.state.vault_meta[safe_filename]["pinned"] = True
     _save_vault_metadata(app.state.vault_meta)
-    return {"status": "pinned", "filename": filename}
+    return {"status": "pinned", "filename": safe_filename}
 
 
 @app.post("/api/v1/documents/{filename}/unpin")
 async def unpin_document_endpoint(filename: str):
     """Unpin a document - it will be auto-cleaned on next server restart."""
-    if filename not in app.state.vault_meta:
-        raise HTTPException(status_code=404, detail=f"Document '{filename}' not tracked in vault.")
-    app.state.vault_meta[filename]["pinned"] = False
+    safe_filename = Path(filename).name
+    if safe_filename not in app.state.vault_meta:
+        raise HTTPException(status_code=404, detail=f"Document '{safe_filename}' not tracked in vault.")
+    app.state.vault_meta[safe_filename]["pinned"] = False
     _save_vault_metadata(app.state.vault_meta)
-    return {"status": "unpinned", "filename": filename}
+    return {"status": "unpinned", "filename": safe_filename}
 
 
 # ---------------------------------------------------------------------------
 # Answer History
 # ---------------------------------------------------------------------------
+
+class HistoryAddRequest(BaseModel):
+    question: str
+    target_marks: int = 10
+    subject: Optional[str] = "General"
+    module_filter: Optional[int] = None
+    generated_answer: str
+    citations: List[Dict[str, Any]] = []
+
+
+@app.post("/api/v1/history/add")
+async def add_history_entry(item: HistoryAddRequest):
+    """Record a synthesized Q&A into server history."""
+    entry = {
+        "id": str(uuid.uuid4()),
+        "question": item.question,
+        "target_marks": item.target_marks,
+        "subject": item.subject or "General",
+        "module_filter": item.module_filter,
+        "generated_answer": item.generated_answer,
+        "citations": item.citations,
+        "timestamp": datetime.now().isoformat()
+    }
+    app.state.answer_history.append(entry)
+    return {"status": "saved", "id": entry["id"]}
+
 
 @app.get("/api/v1/history")
 async def get_history():
