@@ -1,19 +1,23 @@
 services:
-  # FastAPI Backend Service
   - type: web
-    name: rad-uniqa-backend
+    name: Eduniti
     runtime: python
+    plan: free
     rootDir: RAD-UniQA
-    buildCommand: "pip install -r requirements.txt"
-    startCommand: "uvicorn src.api.main:app --host 0.0.0.0 --port $PORT"
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn src.api.main:app --host 0.0.0.0 --port $PORT
     envVars:
       - key: PYTHON_VERSION
-        value: "3.11.8"
-      - key: LLM_PROVIDER
-        value: "auto"
+        value: 3.11.9
       - key: GEMINI_API_KEY
         sync: false
       - key: GROQ_API_KEY
         sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_KEY
+        sync: false
       - key: QDRANT_URL
-        value: "local"
+        sync: false
+      - key: QDRANT_API_KEY
+        sync: false

@@ -1,46 +1,43 @@
 # ============================================================
-# RAD-UniQA — Complete Dependency List
+# RAD-UniQA — Complete Fast Cloud & Local Dependency List
 # ============================================================
 
 # --- Web Framework ---
 fastapi>=0.111.0
 uvicorn[standard]>=0.29.0
-python-multipart>=0.0.9        # Required for FastAPI file/form uploads (upload-pdf endpoint)
+python-multipart>=0.0.9
 
-# --- Data Validation ---
+# --- Data Validation & Configuration ---
 pydantic>=2.6.0
 pydantic-settings>=2.2.0
-
-# --- Configuration ---
 python-dotenv>=1.0.0
 
 # --- PDF Parsing ---
-pymupdf>=1.24.0                # PyMuPDF — import as `pymupdf`
+pymupdf>=1.24.0
 
-# --- Embeddings (EmbedderClient: Gemini first, MiniLM fallback) ---
-google-generativeai>=0.8.0     # Gemini Embedding 2 (text-embedding-004 / gemini-embedding-exp)
-sentence-transformers>=3.0.0   # Local fallback: all-MiniLM-L6-v2 (80MB)
-torch>=2.2.0                   # Required backend for sentence-transformers
+# --- Gemini Cloud Embeddings & Vector Database ---
+google-generativeai>=0.8.0
+qdrant-client>=1.9.0
 
-# --- Vector Database ---
-qdrant-client>=1.9.0           # Supports both HTTP (Docker) and local disk mode
-
-# --- Sparse Retrieval ---
+# --- Sparse Retrieval (BM25) ---
 rank-bm25>=0.2.2
 
-# --- LangChain Core ---
+# --- LangChain Core & LLMs ---
 langchain-core>=0.2.0
 langchain-text-splitters>=0.2.0
+langchain-groq>=0.1.0
+langchain-google-genai>=1.0.0
+langchain-community>=0.2.0
 
-# --- LLM Providers (lazy-loaded at runtime via llm_router) ---
-langchain-groq>=0.1.0              # Groq Cloud (Llama 3.3 70B fallback)
-langchain-google-genai>=1.0.0      # Google Gemini 2.5 Flash / 2.0 Flash Lite
-langchain-community>=0.2.0         # Community integrations
-langchain-ollama>=0.1.0            # Ollama local model (offline fallback)
+# --- Supabase Database & Auth ---
+supabase>=2.0.0
 
-# --- HTTP Utilities ---
+# --- Local Embedding Fallback (CPU-optimized for ultra-fast Render builds) ---
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch
+sentence-transformers>=3.0.0
+
+# --- HTTP Utilities & Types ---
 requests>=2.31.0
-httpx>=0.27.0                  # Used by qdrant-client and langchain internally
-
-# --- Standard Type Support ---
+httpx>=0.27.0
 typing-extensions>=4.11.0
