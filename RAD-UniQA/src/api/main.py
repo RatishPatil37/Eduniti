@@ -54,12 +54,23 @@ from src.ingestion.metadata import extract_metadata_from_filename
 from src.ingestion.chunker import create_parent_child_chunks
 
 
+from src.intelligence.supabase_sync import (
+    load_vault_metadata_from_supabase,
+    sync_vault_metadata_to_supabase,
+    load_question_bank_from_supabase,
+    sync_question_bank_to_supabase
+)
+
 # ---------------------------------------------------------------------------
 # Vault metadata helpers
 # ---------------------------------------------------------------------------
 
 def _load_vault_metadata() -> Dict[str, Dict]:
-    """Load {filename: {pinned, uploaded_at, subject, module}} from disk."""
+    """Load {filename: {pinned, uploaded_at, subject, module}} from Supabase or local disk."""
+    cloud_meta = load_vault_metadata_from_supabase()
+    if cloud_meta is not None:
+        return cloud_meta
+
     if settings.VAULT_METADATA_PATH.exists():
         with open(settings.VAULT_METADATA_PATH, "r", encoding="utf-8") as f:
             return json.load(f)
@@ -70,9 +81,16 @@ def _save_vault_metadata(meta: Dict[str, Dict]) -> None:
     settings.PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
     with open(settings.VAULT_METADATA_PATH, "w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2)
+    # Sync to cloud Supabase table if credentials exist
+    sync_vault_metadata_to_supabase(meta)
 
 
 def _load_question_bank() -> List[Dict]:
+    """Load saved question bank items from Supabase or local disk."""
+    cloud_bank = load_question_bank_from_supabase()
+    if cloud_bank is not None:
+        return cloud_bank
+
     if settings.QUESTION_BANK_PATH.exists():
         with open(settings.QUESTION_BANK_PATH, "r", encoding="utf-8") as f:
             return json.load(f)
@@ -83,6 +101,8 @@ def _save_question_bank(bank: List[Dict]) -> None:
     settings.PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
     with open(settings.QUESTION_BANK_PATH, "w", encoding="utf-8") as f:
         json.dump(bank, f, indent=2)
+    # Sync to cloud Supabase table if credentials exist
+    sync_question_bank_to_supabase(bank)
 
 
 # ---------------------------------------------------------------------------

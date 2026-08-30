@@ -29,25 +29,32 @@ def _is_server_reachable(url: str, default_port: int = 6333, timeout: float = 0.
 
 def get_qdrant_client() -> AsyncQdrantClient:
     """
-    Creates an AsyncQdrantClient.
-    If QDRANT_URL is set and server is reachable on port 6333, connects to it.
+    Creates an AsyncQdrantClient supporting both Qdrant Cloud and local embedded disk mode.
+    If QDRANT_URL is set (e.g. cloud or custom host) and optional QDRANT_API_KEY is present,
+    connects securely to the Qdrant Cloud server.
     Otherwise, seamlessly falls back to embedded local disk storage in ./qdrant_storage.
     """
     qdrant_url = settings.QDRANT_URL.strip() if settings.QDRANT_URL else ""
+    api_key = settings.QDRANT_API_KEY.strip() if getattr(settings, "QDRANT_API_KEY", "") else None
     local_path = str(settings.BASE_DIR / "qdrant_storage")
     os.makedirs(local_path, exist_ok=True)
 
     if not qdrant_url or qdrant_url == "local":
-        logger.info(f"Qdrant mode: Local embedded disk storage ({local_path})")
+        logger.info(f"✨ [QDRANT] Mode: Embedded Local Disk Storage ({local_path})")
         return AsyncQdrantClient(path=local_path)
 
-    # Check if remote Qdrant server is actually up
-    if _is_server_reachable(qdrant_url):
-        logger.info(f"Qdrant mode: Remote server ({qdrant_url})")
-        return AsyncQdrantClient(url=qdrant_url)
-    else:
-        logger.info(f"Qdrant server at '{qdrant_url}' is offline. Falling back to local disk storage ({local_path}).")
-        return AsyncQdrantClient(path=local_path)
+    # Check if this is a localhost endpoint vs a remote cloud endpoint
+    if "localhost" in qdrant_url or "127.0.0.1" in qdrant_url:
+        if _is_server_reachable(qdrant_url):
+            logger.info(f"✨ [QDRANT] Connected to local Docker instance at {qdrant_url}")
+            return AsyncQdrantClient(url=qdrant_url, api_key=api_key)
+        else:
+            logger.info(f"✨ [QDRANT] Local Docker offline. Using embedded disk storage ({local_path})")
+            return AsyncQdrantClient(path=local_path)
+
+    # Remote Qdrant Cloud Cluster
+    logger.info(f"✨ [QDRANT] Connected to Cloud Cluster ({qdrant_url})")
+    return AsyncQdrantClient(url=qdrant_url, api_key=api_key, timeout=10.0)
 
 
 async def setup_collection(client: AsyncQdrantClient, vector_size: int = 768) -> None:
