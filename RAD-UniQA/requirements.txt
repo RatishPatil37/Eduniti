@@ -32,9 +32,7 @@ langchain-community>=0.2.0
 # --- Supabase Database & Auth ---
 supabase>=2.0.0
 
-# --- Local Embedding Fallback (CPU-optimized for ultra-fast Render builds) ---
---extra-index-url https://download.pytorch.org/whl/cpu
-torch
+# --- Local Embedding Fallback ---
 sentence-transformers>=3.0.0
 
 # --- HTTP Utilities & Types ---
