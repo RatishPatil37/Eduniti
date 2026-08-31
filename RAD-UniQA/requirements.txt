@@ -29,6 +29,11 @@ langchain-groq>=0.1.0
 langchain-google-genai>=1.0.0
 langchain-community>=0.2.0
 
+# --- Machine Learning, Graph & Intelligence ---
+scikit-learn>=1.4.0
+networkx>=3.0
+numpy>=1.26.0
+
 # --- Supabase Database & Auth ---
 supabase>=2.0.0
 
