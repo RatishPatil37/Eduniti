@@ -903,8 +903,20 @@ async def practice_submit_endpoint(req: PracticeSubmitRequest):
 
 
 # ---------------------------------------------------------------------------
-# Health
+# Root & Health Check Endpoints
 # ---------------------------------------------------------------------------
+
+@app.get("/")
+@app.head("/")
+async def root():
+    return {
+        "status": "online",
+        "service": "RAD-UniQA / Eduniti Backend API",
+        "version": "2.0.0",
+        "docs_url": "/docs",
+        "health_check": "/health"
+    }
+
 
 @app.get("/health")
 async def health():
