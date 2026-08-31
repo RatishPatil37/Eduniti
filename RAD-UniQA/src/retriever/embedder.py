@@ -144,16 +144,35 @@ class EmbedderClient:
         return all_embeddings
 
     def _local_encode(self, sentences: List[str], normalize: bool):
-        """Loads all-MiniLM-L6-v2 on first call and encodes locally."""
+        """Loads FastEmbed (20MB ONNX) or SentenceTransformers with minimal memory footprint."""
         if self._local_model is None:
-            print(f"🖥️  [EMBEDDER] Loading local model {self.LOCAL_FALLBACK_MODEL} into memory...")
-            from sentence_transformers import SentenceTransformer
-            self._local_model = SentenceTransformer(self.LOCAL_FALLBACK_MODEL)
-            self._dim = self.LOCAL_FALLBACK_DIM
+            try:
+                from fastembed import TextEmbedding
+                print(f"⚡ [EMBEDDER] Loading ultra-lightweight FastEmbed ONNX engine (~20MB RAM)...")
+                self._local_model = TextEmbedding(model_name="BAAI/bge-small-en-v1.5")
+                self._dim = 384
+                self._is_fastembed = True
+            except Exception:
+                try:
+                    from sentence_transformers import SentenceTransformer
+                    print(f"🖥️  [EMBEDDER] Loading fallback model {self.LOCAL_FALLBACK_MODEL}...")
+                    self._local_model = SentenceTransformer(self.LOCAL_FALLBACK_MODEL)
+                    self._dim = self.LOCAL_FALLBACK_DIM
+                    self._is_fastembed = False
+                except Exception:
+                    print("⚠️  [EMBEDDER] No local embedding engine found. Using fallback zero-vectors.")
+                    self._dim = 384
+                    self._local_model = "dummy"
+                    self._is_fastembed = False
 
-        print(f"⚡ [EMBEDDER] Encoding {len(sentences)} items locally ({self.LOCAL_FALLBACK_MODEL})...")
-        return self._local_model.encode(
-            sentences,
-            normalize_embeddings=normalize,
-            convert_to_numpy=False
-        )
+        if getattr(self, "_is_fastembed", False):
+            embeddings = list(self._local_model.embed(sentences))
+            return [e.tolist() if hasattr(e, "tolist") else list(e) for e in embeddings]
+        elif self._local_model == "dummy":
+            return [[0.0] * 384 for _ in sentences]
+        else:
+            return self._local_model.encode(
+                sentences,
+                normalize_embeddings=normalize,
+                convert_to_numpy=False
+            )

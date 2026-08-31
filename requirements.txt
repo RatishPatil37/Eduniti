@@ -32,8 +32,8 @@ langchain-community>=0.2.0
 # --- Supabase Database & Auth ---
 supabase>=2.0.0
 
-# --- Local Embedding Fallback ---
-sentence-transformers>=3.0.0
+# --- Ultra-Lightweight Local Embedding Fallback (ONNX, ~20MB RAM) ---
+fastembed>=0.2.0
 
 # --- HTTP Utilities & Types ---
 requests>=2.31.0
