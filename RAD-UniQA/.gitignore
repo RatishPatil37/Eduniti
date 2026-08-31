@@ -10,14 +10,13 @@ __pycache__/
 *$py.class
 *.so
 .Python
+# Python Build Artifacts
 build/
 develop-eggs/
 dist/
 downloads/
 eggs/
 .eggs/
-lib/
-lib64/
 parts/
 sdist/
 var/
@@ -27,6 +26,7 @@ share/python-wheels/
 .installed.cfg
 *.egg
 MANIFEST
+!frontend/src/lib/**
 
 # Virtual Environments
 .venv/
