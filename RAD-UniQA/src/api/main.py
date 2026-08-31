@@ -112,6 +112,8 @@ def _save_question_bank(bank: List[Dict]) -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     print("Initializing RAD-UniQA system components...")
+    settings.PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
+    settings.RAW_DOCS_DIR.mkdir(parents=True, exist_ok=True)
     app.state.qdrant_client = get_qdrant_client()
 
     # EmbedderClient: tries Gemini text-embedding-004 first, falls back to all-MiniLM-L6-v2
