@@ -72,13 +72,14 @@ async def answer_question(
     bm25: Any,
     bm25_corpus: List[Dict[str, Any]],
     parent_store: Dict[str, Dict[str, Any]],
-    use_cache: bool = True
+    use_cache: bool = True,
+    user_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Primary synchronous RAG answer generator with resilient failover.
     """
     start_time = time.time()
-    ckey = _cache_key(question, target_marks, subject, module_filter)
+    ckey = f"{user_id or 'global'}:{_cache_key(question, target_marks, subject, module_filter)}"
 
     if use_cache and ckey in _QUERY_CACHE:
         cached = _QUERY_CACHE[ckey]
@@ -86,7 +87,7 @@ async def answer_question(
         return cached
 
     print(f"\n=======================================================")
-    print(f"🎯 [RAG PIPELINE] Synthesizing {target_marks}-Mark Answer for: '{question}'")
+    print(f"🎯 [RAG PIPELINE] Synthesizing {target_marks}-Mark Answer for: '{question}' (User: {user_id or 'Global'})")
     print(f"📌 [FILTERS] Subject: {subject or 'All'} | Module: {module_filter or 'All'}")
 
     # 1. Parallel Hybrid Search
@@ -98,7 +99,8 @@ async def answer_question(
         bm25_corpus=bm25_corpus,
         subject_filter=subject,
         module_filter=module_filter,
-        top_k=settings.TOP_K_CANDIDATES
+        top_k=settings.TOP_K_CANDIDATES,
+        user_id=user_id,
     )
 
     if not candidates:
@@ -182,13 +184,14 @@ async def answer_question_stream(
     bm25: Any,
     bm25_corpus: List[Dict[str, Any]],
     parent_store: Dict[str, Dict[str, Any]],
+    user_id: Optional[str] = None,
 ) -> AsyncGenerator[str, None]:
     """
     Streaming version of answer_question with automatic failover.
     Yields SSE-formatted chunks.
     """
     start_time = time.time()
-    print(f"\n🌊 [STREAM PIPELINE] Starting streaming synthesis for {target_marks}-mark question")
+    print(f"\n🌊 [STREAM PIPELINE] Starting streaming synthesis for {target_marks}-mark question (User: {user_id or 'Global'})")
     print(f"📝 [QUESTION] \"{question}\"")
 
     # 1. Retrieve candidates
@@ -200,7 +203,8 @@ async def answer_question_stream(
         bm25_corpus=bm25_corpus,
         subject_filter=subject,
         module_filter=module_filter,
-        top_k=settings.TOP_K_CANDIDATES
+        top_k=settings.TOP_K_CANDIDATES,
+        user_id=user_id,
     )
 
     if not candidates:

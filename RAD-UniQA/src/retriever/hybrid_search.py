@@ -85,6 +85,7 @@ def _bm25_search(
     subject_filter: Optional[str],
     module_filter: Optional[int],
     top_k: int,
+    user_id: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Run BM25 sparse lexical search (sync, runs in thread via asyncio)."""
     if not bm25 or not bm25_corpus:
@@ -96,6 +97,11 @@ def _bm25_search(
     filtered_indices = []
     for idx, item in enumerate(bm25_corpus):
         meta = item.get("metadata", {})
+        # Multi-tenant isolation: do not retrieve private documents belonging to other users
+        if user_id:
+            doc_user = meta.get("user_id")
+            if doc_user and doc_user != user_id and not meta.get("is_global", False):
+                continue
         if subject_filter and subject_filter.lower() not in ("all", "all subjects", "general"):
             if meta.get("subject") != subject_filter:
                 continue
@@ -124,7 +130,8 @@ async def _run_single_search(
     bm25_corpus: List[Dict[str, Any]],
     subject_filter: Optional[str],
     module_filter: Optional[int],
-    top_k: int
+    top_k: int,
+    user_id: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """
     Runs dense and BM25 searches in PARALLEL using asyncio.gather.
@@ -140,12 +147,22 @@ async def _run_single_search(
         must_conditions.append(
             models.FieldCondition(key="module_number", match=models.MatchValue(value=module_filter))
         )
-    qdrant_filter = models.Filter(must=must_conditions) if must_conditions else None
+
+    # Multi-tenant filter for Qdrant: (user_id == current_user) OR (is_global == True) OR (user_id is NULL)
+    if user_id:
+        should_conditions = [
+            models.FieldCondition(key="user_id", match=models.MatchValue(value=user_id)),
+            models.FieldCondition(key="is_global", match=models.MatchValue(value=True)),
+            models.IsNullCondition(is_null=models.PayloadField(key="user_id")),
+        ]
+        qdrant_filter = models.Filter(must=must_conditions, should=should_conditions)
+    else:
+        qdrant_filter = models.Filter(must=must_conditions) if must_conditions else None
 
     # Run dense and BM25 in parallel
     dense_task = _dense_search(query, client, embedder, qdrant_filter, top_k)
     bm25_task = asyncio.get_event_loop().run_in_executor(
-        None, _bm25_search, query, bm25, bm25_corpus, subject_filter, module_filter, top_k
+        None, _bm25_search, query, bm25, bm25_corpus, subject_filter, module_filter, top_k, user_id
     )
 
     dense_results, sparse_results = await asyncio.gather(dense_task, bm25_task)
@@ -162,18 +179,20 @@ async def hybrid_search(
     bm25_corpus: List[Dict[str, Any]],
     subject_filter: Optional[str] = None,
     module_filter: Optional[int] = None,
-    top_k: int = 20
+    top_k: int = 20,
+    user_id: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """
-    Executes parallel dense semantic search and sparse lexical search.
+    Executes parallel dense semantic search and sparse lexical search with tenant isolation.
     If filtered search yields 0 candidates, automatically falls back to full-corpus search.
     """
-    print(f"\n🔍 [HYBRID SEARCH] Query: \"{query}\" | Subject: {subject_filter or 'All'} | Module: {module_filter or 'All'}")
+    print(f"\n🔍 [HYBRID SEARCH] Query: \"{query}\" | Subject: {subject_filter or 'All'} | Module: {module_filter or 'All'} | User: {user_id or 'Global'}")
 
     candidates = await _run_single_search(
         query=query, client=client, embedder=embedder,
         bm25=bm25, bm25_corpus=bm25_corpus,
-        subject_filter=subject_filter, module_filter=module_filter, top_k=top_k
+        subject_filter=subject_filter, module_filter=module_filter, top_k=top_k,
+        user_id=user_id,
     )
 
     # Graceful fallback if filtered search found nothing
@@ -182,7 +201,8 @@ async def hybrid_search(
         candidates = await _run_single_search(
             query=query, client=client, embedder=embedder,
             bm25=bm25, bm25_corpus=bm25_corpus,
-            subject_filter=None, module_filter=None, top_k=top_k
+            subject_filter=None, module_filter=None, top_k=top_k,
+            user_id=user_id,
         )
 
     print(f"📊 [HYBRID SEARCH] Retrieved {len(candidates)} fused candidates (parallel Dense + BM25)")

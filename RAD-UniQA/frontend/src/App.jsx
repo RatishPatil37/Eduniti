@@ -768,6 +768,38 @@ export default function App() {
     return () => clearInterval(iv);
   }, []);
 
+  // Authenticated headers helper for multi-tenant isolation
+  const getAuthHeaders = useCallback(async (includeJson = true) => {
+    const headers = includeJson ? { 'Content-Type': 'application/json' } : {};
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (session?.access_token) {
+        headers['Authorization'] = `Bearer ${session.access_token}`;
+      }
+      if (user?.id) {
+        headers['X-User-Id'] = user.id;
+      }
+    } catch (e) {
+      console.warn('[AUTH] Error obtaining session token:', e);
+    }
+    return headers;
+  }, [user]);
+
+  // SWR: Preload cached data per-user on initial render and user switch (0ms load time)
+  useEffect(() => {
+    const uid = user?.id || 'guest';
+    try {
+      const d = localStorage.getItem(`rad_docs_cache_${uid}`);
+      if (d) setDocuments(JSON.parse(d));
+      const h = localStorage.getItem(`rad_history_cache_${uid}`);
+      if (h) setHistory(JSON.parse(h));
+      const b = localStorage.getItem(`rad_bank_cache_${uid}`);
+      if (b) setBank(JSON.parse(b));
+    } catch (e) {
+      console.warn('Error reading SWR cache:', e);
+    }
+  }, [user]);
+
   // Fetch Data on Tab Switch
   useEffect(() => {
     if (tab === 'vault') fetchDocuments();
@@ -780,33 +812,55 @@ export default function App() {
   }, [tab, subject]);
 
   const fetchDocuments = async () => {
-    setDocsLoading(true);
+    if (documents.length === 0) setDocsLoading(true);
     try {
-      const r = await fetch(`${API_BASE}/api/v1/documents`);
+      const headers = await getAuthHeaders();
+      const r = await fetch(`${API_BASE}/api/v1/documents`, { headers });
       const d = await r.json();
-      setDocuments(d.documents || []);
-    } catch { setDocuments([]); }
-    finally { setDocsLoading(false); }
+      const docs = d.documents || [];
+      setDocuments(docs);
+      try {
+        localStorage.setItem(`rad_docs_cache_${user?.id || 'guest'}`, JSON.stringify(docs));
+      } catch {}
+    } catch {
+      // Keep cached documents on network error
+    } finally {
+      setDocsLoading(false);
+    }
   };
 
   const fetchHistory = async () => {
-    setHistoryLoading(true);
+    if (history.length === 0) setHistoryLoading(true);
     try {
-      const r = await fetch(`${API_BASE}/api/v1/history`);
+      const headers = await getAuthHeaders();
+      const r = await fetch(`${API_BASE}/api/v1/history`, { headers });
       const d = await r.json();
-      setHistory(d.history || []);
-    } catch { setHistory([]); }
-    finally { setHistoryLoading(false); }
+      const hist = d.history || [];
+      setHistory(hist);
+      try {
+        localStorage.setItem(`rad_history_cache_${user?.id || 'guest'}`, JSON.stringify(hist));
+      } catch {}
+    } catch {
+    } finally {
+      setHistoryLoading(false);
+    }
   };
 
   const fetchBank = async () => {
-    setBankLoading(true);
+    if (bank.length === 0) setBankLoading(true);
     try {
-      const r = await fetch(`${API_BASE}/api/v1/bank`);
+      const headers = await getAuthHeaders();
+      const r = await fetch(`${API_BASE}/api/v1/bank`, { headers });
       const d = await r.json();
-      setBank(d.bank || []);
-    } catch { setBank([]); }
-    finally { setBankLoading(false); }
+      const b = d.bank || [];
+      setBank(b);
+      try {
+        localStorage.setItem(`rad_bank_cache_${user?.id || 'guest'}`, JSON.stringify(b));
+      } catch {}
+    } catch {
+    } finally {
+      setBankLoading(false);
+    }
   };
 
   const fetchPredictions = async () => {
@@ -883,9 +937,10 @@ export default function App() {
     let provider = '';
 
     try {
+      const headers = await getAuthHeaders();
       const response = await fetch(`${API_BASE}/api/v1/query/stream`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify({
           question,
           subject: subject === 'All Subjects' ? null : subject,
@@ -932,20 +987,38 @@ export default function App() {
         }
       }
 
-      setQaResult({
+      const newResult = {
         question,
         target_marks: targetMarks,
         generated_answer: fullText,
         citations,
         retrieval_latency_ms: 0
-      });
+      };
+      setQaResult(newResult);
 
-      // Record to history
+      // Record to history optimistically
       if (fullText) {
+        const histEntry = {
+          id: String(Date.now()),
+          question,
+          target_marks: targetMarks,
+          subject,
+          module_filter: moduleFilter ? parseInt(moduleFilter) : null,
+          generated_answer: fullText,
+          citations,
+          timestamp: new Date().toISOString()
+        };
+        setHistory(prev => {
+          const updated = [histEntry, ...prev].slice(0, 50);
+          try { localStorage.setItem(`rad_history_cache_${user?.id || 'guest'}`, JSON.stringify(updated)); } catch {}
+          return updated;
+        });
+
         try {
+          const addHeaders = await getAuthHeaders();
           await fetch(`${API_BASE}/api/v1/history/add`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: addHeaders,
             body: JSON.stringify({ question, subject, target_marks: targetMarks, generated_answer: fullText, citations })
           });
         } catch { /* non-critical */ }
@@ -964,10 +1037,29 @@ export default function App() {
 
   const saveToBank = async () => {
     if (!qaResult) return;
+    const newItem = {
+      id: String(Date.now()),
+      question: qaResult.question,
+      target_marks: qaResult.target_marks,
+      subject,
+      generated_answer: qaResult.generated_answer,
+      citations: qaResult.citations,
+      tags: [subject, `${targetMarks}-mark`],
+      saved_at: new Date().toISOString()
+    };
+    // Optimistic bank update
+    setBank(prev => {
+      const updated = [newItem, ...prev];
+      try { localStorage.setItem(`rad_bank_cache_${user?.id || 'guest'}`, JSON.stringify(updated)); } catch {}
+      return updated;
+    });
+    toast('Saved to Question Bank', 'success');
+
     try {
-      const r = await fetch(`${API_BASE}/api/v1/bank/save`, {
+      const headers = await getAuthHeaders();
+      await fetch(`${API_BASE}/api/v1/bank/save`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify({
           question: qaResult.question,
           target_marks: qaResult.target_marks,
@@ -977,9 +1069,9 @@ export default function App() {
           tags: [subject, `${targetMarks}-mark`]
         })
       });
-      if (r.ok) toast('Saved to Question Bank', 'success');
-      else toast('Failed to save to Question Bank', 'error');
-    } catch { toast('Could not connect to server', 'error'); }
+    } catch {
+      toast('Background sync failed', 'error');
+    }
   };
 
   const copyAnswer = () => {
@@ -990,10 +1082,16 @@ export default function App() {
     toast('Answer copied to clipboard', 'success');
   };
 
-  // Upload Handler
+  // Upload Handler with tenant isolation and 15MB limit check
   const handleUpload = async (e) => {
     e?.preventDefault();
     if (!selectedFile || uploading) return;
+
+    if (selectedFile.size > 15 * 1024 * 1024) {
+      toast('File exceeds 15MB upload limit. Please select a smaller PDF.', 'error');
+      return;
+    }
+
     setUploading(true);
     const fd = new FormData();
     fd.append('file', selectedFile);
@@ -1001,7 +1099,8 @@ export default function App() {
     if (uploadModule) fd.append('module_number', uploadModule);
     fd.append('pin_to_vault', pinToVault);
     try {
-      const r = await fetch(`${API_BASE}/api/v1/upload-pdf`, { method: 'POST', body: fd });
+      const headers = await getAuthHeaders(false);
+      const r = await fetch(`${API_BASE}/api/v1/upload-pdf`, { method: 'POST', body: fd, headers });
       const d = await r.json();
       if (r.ok) {
         toast(`Ingested "${selectedFile.name}" (${d.child_chunks} chunks)`, 'success');
@@ -1018,42 +1117,74 @@ export default function App() {
   };
 
   const deleteDocument = async (filename) => {
+    // Optimistic removal:
+    const updated = documents.filter(d => d.filename !== filename);
+    setDocuments(updated);
+    try { localStorage.setItem(`rad_docs_cache_${user?.id || 'guest'}`, JSON.stringify(updated)); } catch {}
+
     try {
-      const r = await fetch(`${API_BASE}/api/v1/documents/${encodeURIComponent(filename)}`, { method: 'DELETE' });
+      const headers = await getAuthHeaders();
+      const r = await fetch(`${API_BASE}/api/v1/documents/${encodeURIComponent(filename)}`, { method: 'DELETE', headers });
       if (r.ok) {
         toast(`Deleted "${filename}"`, 'success');
-        fetchDocuments();
+      } else {
+        const d = await r.json();
+        toast(d.detail || 'Could not delete document', 'error');
+        fetchDocuments(); // Rollback if error
       }
-    } catch { toast('Could not connect', 'error'); }
+    } catch {
+      toast('Could not connect', 'error');
+      fetchDocuments();
+    }
   };
 
   const pinDocument = async (filename, currentlyPinned) => {
     const action = currentlyPinned ? 'unpin' : 'pin';
+    // Optimistic pin toggle:
+    const updated = documents.map(d => d.filename === filename ? { ...d, pinned: !currentlyPinned } : d);
+    setDocuments(updated);
+    try { localStorage.setItem(`rad_docs_cache_${user?.id || 'guest'}`, JSON.stringify(updated)); } catch {}
+
     try {
-      const r = await fetch(`${API_BASE}/api/v1/documents/${encodeURIComponent(filename)}/${action}`, { method: 'POST' });
+      const headers = await getAuthHeaders();
+      const r = await fetch(`${API_BASE}/api/v1/documents/${encodeURIComponent(filename)}/${action}`, { method: 'POST', headers });
       if (r.ok) {
         toast(`${currentlyPinned ? 'Unpinned' : 'Pinned'} "${filename}"`, 'success');
+      } else {
         fetchDocuments();
       }
-    } catch { toast('Action failed', 'error'); }
+    } catch {
+      toast('Action failed', 'error');
+      fetchDocuments();
+    }
   };
 
   const deleteBankItem = async (id) => {
+    // Optimistic delete from bank:
+    const updated = bank.filter(b => b.id !== id);
+    setBank(updated);
+    try { localStorage.setItem(`rad_bank_cache_${user?.id || 'guest'}`, JSON.stringify(updated)); } catch {}
+    toast('Removed from Question Bank', 'success');
+
     try {
-      const r = await fetch(`${API_BASE}/api/v1/bank/${id}`, { method: 'DELETE' });
-      if (r.ok) {
-        toast('Removed from Question Bank', 'success');
-        fetchBank();
-      }
-    } catch { toast('Could not connect', 'error'); }
+      const headers = await getAuthHeaders();
+      const r = await fetch(`${API_BASE}/api/v1/bank/${id}`, { method: 'DELETE', headers });
+      if (!r.ok) fetchBank();
+    } catch {
+      toast('Could not connect', 'error');
+      fetchBank();
+    }
   };
 
   const clearHistory = async () => {
+    setHistory([]);
+    try { localStorage.removeItem(`rad_history_cache_${user?.id || 'guest'}`); } catch {}
+    toast('Session history cleared', 'info');
+
     try {
-      await fetch(`${API_BASE}/api/v1/history`, { method: 'DELETE' });
-      setHistory([]);
-      toast('Session history cleared', 'info');
-    } catch { toast('Could not connect', 'error'); }
+      const headers = await getAuthHeaders();
+      await fetch(`${API_BASE}/api/v1/history`, { method: 'DELETE', headers });
+    } catch { /* silent */ }
   };
 
   const handlePracticeSubmit = async () => {
@@ -1296,20 +1427,56 @@ export default function App() {
                     />
                   </div>
 
-                  <div>
-                    <label className="field-label">Target Marks</label>
-                    <div className="pill-selector-bar">
-                      {[2, 5, 10].map(m => (
-                        <button key={m} className={`pill-option-btn ${targetMarks === m ? 'active' : ''}`} onClick={() => setTargetMarks(m)}>
-                          {m} Mark{m > 1 ? 's' : ''}
-                        </button>
-                      ))}
+                  {/* ChatGPT-Inspired Reasoning Effort & Target Marks Stepper */}
+                  <div className="effort-selector-widget">
+                    <div className="effort-selector-header">
+                      <div className="effort-selector-title">
+                        <Zap size={14} className="effort-icon" />
+                        <span>Reasoning Effort & Target Marks</span>
+                      </div>
+                      <div className="model-chip">
+                        <span className="model-chip-dot"></span>
+                        <span>Gemini 3.7 Flash + Qdrant</span>
+                      </div>
+                    </div>
+
+                    <div className="effort-stepper-track">
+                      {[
+                        { marks: 2, label: '2 Marks', desc: 'Quick Definition', detail: 'Concise (~1.5s)' },
+                        { marks: 5, label: '5 Marks', desc: 'Concept Breakdown', detail: 'Structured Tables' },
+                        { marks: 10, label: '10 Marks', desc: 'Deep Derivation', detail: 'Full Math + Mermaid' },
+                      ].map(tier => {
+                        const active = targetMarks === tier.marks;
+                        return (
+                          <button
+                            key={tier.marks}
+                            type="button"
+                            className={`effort-step-node ${active ? 'active' : ''}`}
+                            onClick={() => setTargetMarks(tier.marks)}
+                          >
+                            <div className="step-node-top">
+                              <span className="step-bullet"></span>
+                              <span className="step-label">{tier.label}</span>
+                            </div>
+                            <span className="step-desc">{tier.desc}</span>
+                            <span className="step-detail">{tier.detail}</span>
+                          </button>
+                        );
+                      })}
                     </div>
                   </div>
 
-                  <div>
-                    <label className="field-label">Module Filter</label>
-                    <input className="input-field" type="number" placeholder="e.g. 3 (optional)" value={moduleFilter} onChange={e => setModuleFilter(e.target.value)} min={1} max={8} />
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, alignItems: 'center' }}>
+                    <div>
+                      <label className="field-label">Module Filter</label>
+                      <input className="input-field" type="number" placeholder="e.g. 3 (optional)" value={moduleFilter} onChange={e => setModuleFilter(e.target.value)} min={1} max={8} />
+                    </div>
+                    <div>
+                      <label className="field-label">Active Subject</label>
+                      <div className="badge-tag badge-cyan" style={{ height: 38, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '0.8rem', fontWeight: 600 }}>
+                        {subject}
+                      </div>
+                    </div>
                   </div>
 
                   <button className="btn btn-primary" style={{ width: '100%' }} onClick={handleQASubmit} disabled={qaLoading || !question.trim()}>

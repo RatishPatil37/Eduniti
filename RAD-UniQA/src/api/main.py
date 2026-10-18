@@ -28,6 +28,8 @@ import time
 import json
 import uuid
 import logging
+import asyncio
+from collections import defaultdict, deque
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
@@ -39,13 +41,40 @@ if hasattr(sys.stdout, "reconfigure"):
     except Exception:
         pass
 from typing import Optional, List, Dict, Any
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Request
 from fastapi.middleware.cors import CORSMiddleware
 from qdrant_client import AsyncQdrantClient
 from rank_bm25 import BM25Okapi
 from pathlib import Path
 from pydantic import BaseModel, Field
 import shutil
+
+# ---------------------------------------------------------------------------
+# In-Memory Sliding Window Rate Limiter (Defensive Security: SEC-03)
+# ---------------------------------------------------------------------------
+RATE_LIMIT_WINDOW_SEC = 60
+RATE_LIMIT_MAX_REQUESTS = 25  # Max 25 queries / minute per IP
+
+_ip_request_timestamps: Dict[str, deque] = defaultdict(lambda: deque())
+
+def check_rate_limit(request: Request):
+    client_ip = (
+        request.headers.get("x-forwarded-for", "").split(",")[0].strip()
+        or (request.client.host if request.client else "unknown")
+    )
+    now = time.time()
+    timestamps = _ip_request_timestamps[client_ip]
+
+    while timestamps and (now - timestamps[0]) > RATE_LIMIT_WINDOW_SEC:
+        timestamps.popleft()
+
+    if len(timestamps) >= RATE_LIMIT_MAX_REQUESTS:
+        raise HTTPException(
+            status_code=429,
+            detail="Rate limit exceeded. Please wait 60 seconds before sending more requests."
+        )
+
+    timestamps.append(now)
 
 from src.config import settings
 from src.api.schemas import QueryRequest, QueryResponse, SourceCitation
@@ -58,25 +87,47 @@ from src.ingestion.chunker import create_parent_child_chunks
 
 
 from src.intelligence.supabase_sync import (
+    get_user_from_token,
     load_vault_metadata_from_supabase,
     sync_vault_metadata_to_supabase,
     load_question_bank_from_supabase,
-    sync_question_bank_to_supabase
+    sync_question_bank_to_supabase,
+    load_exam_history_from_supabase,
+    sync_exam_history_to_supabase,
 )
 
 # ---------------------------------------------------------------------------
-# Vault metadata helpers
+# Tenant Authentication & Extraction Helper (Defensive Security: SEC-00)
+# ---------------------------------------------------------------------------
+def get_current_user_id(request: Request) -> Optional[str]:
+    """
+    Extracts authenticated user ID from Supabase Authorization Bearer token.
+    Falls back to X-User-Id header for backward compatibility.
+    """
+    auth_header = request.headers.get("authorization", "").strip()
+    if auth_header.startswith("Bearer "):
+        user_info = get_user_from_token(auth_header)
+        if user_info and user_info.get("id"):
+            return user_info["id"]
+    x_user = request.headers.get("x-user-id", "").strip()
+    if x_user:
+        return x_user
+    return None
+
+ANSWER_HISTORY_PATH = settings.PROCESSED_DIR / "answer_history.json"
+
+# ---------------------------------------------------------------------------
+# Vault & Storage Helpers (Local-First 0ms Boot + Cloud Sync)
 # ---------------------------------------------------------------------------
 
-def _load_vault_metadata() -> Dict[str, Dict]:
-    """Load {filename: {pinned, uploaded_at, subject, module}} from Supabase or local disk."""
-    cloud_meta = load_vault_metadata_from_supabase()
-    if cloud_meta is not None:
-        return cloud_meta
-
+def _load_vault_metadata_local() -> Dict[str, Dict]:
+    """Fast local-first metadata load (0ms startup latency)."""
     if settings.VAULT_METADATA_PATH.exists():
-        with open(settings.VAULT_METADATA_PATH, "r", encoding="utf-8") as f:
-            return json.load(f)
+        try:
+            with open(settings.VAULT_METADATA_PATH, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
     return {}
 
 
@@ -84,28 +135,47 @@ def _save_vault_metadata(meta: Dict[str, Dict]) -> None:
     settings.PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
     with open(settings.VAULT_METADATA_PATH, "w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2)
-    # Sync to cloud Supabase table if credentials exist
     sync_vault_metadata_to_supabase(meta)
 
 
-def _load_question_bank() -> List[Dict]:
-    """Load saved question bank items from Supabase or local disk."""
-    cloud_bank = load_question_bank_from_supabase()
-    if cloud_bank is not None:
-        return cloud_bank
-
+def _load_question_bank_local() -> List[Dict]:
+    """Fast local-first question bank load."""
     if settings.QUESTION_BANK_PATH.exists():
-        with open(settings.QUESTION_BANK_PATH, "r", encoding="utf-8") as f:
-            return json.load(f)
+        try:
+            with open(settings.QUESTION_BANK_PATH, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
     return []
 
 
-def _save_question_bank(bank: List[Dict]) -> None:
+def _save_question_bank(bank: List[Dict], user_id: Optional[str] = None) -> None:
     settings.PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
     with open(settings.QUESTION_BANK_PATH, "w", encoding="utf-8") as f:
         json.dump(bank, f, indent=2)
-    # Sync to cloud Supabase table if credentials exist
-    sync_question_bank_to_supabase(bank)
+    sync_question_bank_to_supabase(bank, user_id=user_id)
+
+
+def _load_answer_history_local() -> List[Dict]:
+    """Load persistent answer history from disk."""
+    if ANSWER_HISTORY_PATH.exists():
+        try:
+            with open(ANSWER_HISTORY_PATH, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return []
+
+
+def _save_answer_history(history: List[Dict], user_id: Optional[str] = None) -> None:
+    """Save answer history to disk and sync recent records to Supabase."""
+    try:
+        settings.PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
+        with open(ANSWER_HISTORY_PATH, "w", encoding="utf-8") as f:
+            json.dump(list(history)[-100:], f, indent=2)
+        sync_exam_history_to_supabase(list(history)[-20:], user_id=user_id)
+    except Exception as e:
+        logger.warning(f"History persistence notice: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -146,8 +216,30 @@ async def lifespan(app: FastAPI):
     else:
         app.state.parent_store = {}
 
-    # Load vault metadata (pinned vs session tracking)
-    app.state.vault_meta = _load_vault_metadata()
+    # Load vault metadata and question bank locally first (0ms boot)
+    app.state.vault_meta = _load_vault_metadata_local()
+    app.state.question_bank = _load_question_bank_local()
+    app.state.answer_history = deque(_load_answer_history_local(), maxlen=200)
+
+    # Launch non-blocking background task to sync with Supabase cloud
+    async def _background_cloud_sync():
+        try:
+            cloud_meta = load_vault_metadata_from_supabase()
+            if cloud_meta:
+                app.state.vault_meta.update(cloud_meta)
+            cloud_bank = load_question_bank_from_supabase()
+            if cloud_bank:
+                app.state.question_bank = cloud_bank
+            cloud_history = load_exam_history_from_supabase()
+            if cloud_history:
+                existing_ids = {h.get("id") for h in app.state.answer_history}
+                for h in cloud_history:
+                    if h.get("id") not in existing_ids:
+                        app.state.answer_history.appendleft(h)
+        except Exception as err:
+            logger.debug(f"[BACKGROUND SYNC] Supabase cloud sync notice: {err}")
+
+    asyncio.create_task(_background_cloud_sync())
 
     # Auto-cleanup session-only files from previous restart
     session_cleaned = 0
@@ -177,17 +269,11 @@ async def lifespan(app: FastAPI):
             json.dump(app.state.parent_store, f, indent=2)
         print(f"Auto-cleaned {session_cleaned} session-only document(s) from previous run.")
 
-    # In-memory answer history (resets each server restart - intentional)
-    app.state.answer_history = []
-
-    # Load question bank (persisted on disk)
-    app.state.question_bank = _load_question_bank()
-
     embed_provider = "Gemini text-embedding-004" if settings.GEMINI_API_KEY else "all-MiniLM-L6-v2 (local)"
     print(f"Embedder: {embed_provider}")
     print(f"BM25 corpus: {len(app.state.bm25_corpus)} chunks | Parent store: {len(app.state.parent_store)} parents")
     print(f"Vault: {len(app.state.vault_meta)} pinned documents")
-    print(f"Question bank: {len(app.state.question_bank)} saved Q&As")
+    print(f"Question bank: {len(app.state.question_bank)} saved Q&As | History: {len(app.state.answer_history)} items")
 
     yield
 
@@ -208,7 +294,14 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "https://eduniti.vercel.app",
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    ],
+    allow_origin_regex=r"^https://.*\.vercel\.app$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -220,11 +313,13 @@ app.add_middleware(
 # ---------------------------------------------------------------------------
 
 @app.post("/api/v1/query", response_model=QueryResponse)
-async def query_endpoint(request: QueryRequest):
+async def query_endpoint(request: QueryRequest, raw_request: Request):
     """
-    Primary RAG synthesis endpoint.
+    Primary RAG synthesis endpoint with tenant isolation & rate limiting.
     Returns mark-weighted answer with LaTeX/Mermaid and citations.
     """
+    check_rate_limit(raw_request)
+    user_id = get_current_user_id(raw_request)
     start_time = time.time()
     try:
         result = await answer_question(
@@ -236,20 +331,22 @@ async def query_endpoint(request: QueryRequest):
             embedder=app.state.get_embedder(),
             bm25=app.state.bm25,
             bm25_corpus=app.state.bm25_corpus,
-            parent_store=app.state.parent_store
+            parent_store=app.state.parent_store,
+            user_id=user_id
         )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Error in query_endpoint: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to synthesize answer. Please try again.")
 
     latency_ms = (time.time() - start_time) * 1000.0
 
-    # Record to in-memory history
+    # Record to persistent answer history
     from src.generator.llm_router import resolve_optimal_provider
     task_type = "long_derivation" if request.target_marks >= 10 else (
         "medium_comparison" if request.target_marks >= 5 else "short_definition"
     )
     provider, model = resolve_optimal_provider(task=task_type, target_marks=request.target_marks)
-    app.state.answer_history.append({
+    new_entry = {
         "id": str(uuid.uuid4()),
         "question": request.question,
         "target_marks": request.target_marks,
@@ -260,8 +357,11 @@ async def query_endpoint(request: QueryRequest):
         "provider": provider,
         "model": model,
         "latency_ms": round(latency_ms, 2),
-        "timestamp": datetime.now().isoformat()
-    })
+        "timestamp": datetime.now().isoformat(),
+        "user_id": user_id
+    }
+    app.state.answer_history.append(new_entry)
+    _save_answer_history(app.state.answer_history, user_id=user_id)
 
     return QueryResponse(
         question=result["question"],
@@ -273,12 +373,14 @@ async def query_endpoint(request: QueryRequest):
 
 
 @app.post("/api/v1/query/stream")
-async def query_stream_endpoint(request: QueryRequest):
+async def query_stream_endpoint(request: QueryRequest, raw_request: Request):
     """
     Streaming RAG synthesis endpoint using Server-Sent Events (SSE).
-    First token delivered in ~350-900ms. User sees real-time generation.
-    Event types: 'meta' (citations/provider), 'token' (text chunk), 'done', 'error'
+    Protected by IP rate limiting & tenant-scoped hybrid retrieval.
     """
+    check_rate_limit(raw_request)
+    user_id = get_current_user_id(raw_request)
+
     async def event_generator():
         async for chunk in answer_question_stream(
             question=request.question,
@@ -289,7 +391,8 @@ async def query_stream_endpoint(request: QueryRequest):
             embedder=app.state.get_embedder(),
             bm25=app.state.bm25,
             bm25_corpus=app.state.bm25_corpus,
-            parent_store=app.state.parent_store
+            parent_store=app.state.parent_store,
+            user_id=user_id
         ):
             yield chunk
 
@@ -299,27 +402,39 @@ async def query_stream_endpoint(request: QueryRequest):
         headers={
             "Cache-Control": "no-cache",
             "X-Accel-Buffering": "no",
-            "Access-Control-Allow-Origin": "*",
         }
     )
 
 
 # ---------------------------------------------------------------------------
-# Document Management
+# Document Management (Multi-Tenant & Hardened: SEC-00, SEC-02)
 # ---------------------------------------------------------------------------
+
+MAX_FILE_SIZE = 15 * 1024 * 1024  # 15 MB limit
+MAX_PDF_PAGES = 150               # 150 page limit
 
 @app.post("/api/v1/upload-pdf")
 async def upload_pdf_endpoint(
+    raw_request: Request,
     file: UploadFile = File(...),
     subject: str = Form("NLP"),
     module_number: Optional[int] = Form(None),
     pin_to_vault: bool = Form(False)
 ):
-    """Upload and ingest a university PDF into Qdrant & BM25 indices."""
+    """Upload and ingest a university PDF into Qdrant & BM25 indices with tenant scoping."""
+    check_rate_limit(raw_request)
+    user_id = get_current_user_id(raw_request)
+
     # Sanitize filename against path traversal attacks (e.g. '../../malicious.pdf')
     safe_filename = Path(file.filename).name
     if not safe_filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are supported.")
+
+    # Validate file size (Max 15MB)
+    contents = await file.read(MAX_FILE_SIZE + 1)
+    if len(contents) > MAX_FILE_SIZE:
+        raise HTTPException(status_code=413, detail="File too large. Maximum allowed PDF size is 15MB.")
+    await file.seek(0)
 
     # Validate PDF magic bytes (%PDF-)
     header = await file.read(5)
@@ -339,11 +454,19 @@ async def upload_pdf_endpoint(
 
     try:
         print(f"\n=======================================================")
-        print(f"📄 [INGESTION] Received PDF: '{safe_filename}' | Subject: '{subject}' | Module: {module_number or 'All'} | Pinned: {pin_to_vault}")
+        print(f"📄 [INGESTION] Received PDF: '{safe_filename}' | Subject: '{subject}' | Module: {module_number or 'All'} | User: {user_id or 'Global'}")
         pages = parse_pdf_to_markdown(saved_path)
+
+        # Enforce page count limit
+        if len(pages) > MAX_PDF_PAGES:
+            saved_path.unlink(missing_ok=True)
+            raise HTTPException(status_code=400, detail=f"PDF exceeds the {MAX_PDF_PAGES} page limit (got {len(pages)} pages).")
+
         meta = extract_metadata_from_filename(safe_filename, default_subject=subject)
         if module_number:
             meta["module_number"] = module_number
+        meta["user_id"] = user_id
+        meta["is_global"] = False if user_id else True
 
         parents, children = create_parent_child_chunks(
             pages=pages,
@@ -399,7 +522,7 @@ async def upload_pdf_endpoint(
         await setup_collection(app.state.qdrant_client, vector_size=dim)
         await upsert_child_chunks(app.state.qdrant_client, children, embedder)
 
-        # Track in vault metadata
+        # Track in vault metadata with tenant isolation
         app.state.vault_meta[file.filename] = {
             "filename": file.filename,
             "subject": meta["subject"],
@@ -410,7 +533,9 @@ async def upload_pdf_endpoint(
             "parent_chunks": len(parents),
             "child_chunks": len(children),
             "pinned": pin_to_vault,
-            "uploaded_at": datetime.now().isoformat()
+            "uploaded_at": datetime.now().isoformat(),
+            "user_id": user_id,
+            "is_global": False if user_id else True
         }
         _save_vault_metadata(app.state.vault_meta)
 
@@ -429,20 +554,28 @@ async def upload_pdf_endpoint(
             "pinned": pin_to_vault,
             "total_corpus_chunks": len(app.state.bm25_corpus)
         }
+    except HTTPException:
+        raise
     except Exception as e:
-        print(f"❌ [INGESTION ERROR] Failed to ingest {file.filename}: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to process PDF: {str(e)}")
+        logger.error(f"❌ [INGESTION ERROR] Failed to ingest {file.filename}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to process and index PDF. Please check file formatting.")
 
 
 @app.get("/api/v1/documents")
-async def list_documents_endpoint():
-    """List all documents in the vault with their pin status and metadata."""
+async def list_documents_endpoint(raw_request: Request):
+    """List documents accessible to the requesting user (their own uploads + public/global material)."""
+    user_id = get_current_user_id(raw_request)
     docs = []
     for filename, meta in app.state.vault_meta.items():
+        doc_user = meta.get("user_id")
+        # Multi-tenant isolation: hide private documents of other users
+        if user_id and doc_user and doc_user != user_id and not meta.get("is_global", False):
+            continue
         pdf_path = settings.RAW_DOCS_DIR / filename
         if pdf_path.exists():
             docs.append(meta)
-    # Also catch any PDFs on disk not yet tracked
+
+    # Also catch any unindexed PDFs on disk as legacy global
     if settings.RAW_DOCS_DIR.exists():
         for p in settings.RAW_DOCS_DIR.glob("*.pdf"):
             if p.name not in app.state.vault_meta:
@@ -456,15 +589,26 @@ async def list_documents_endpoint():
                     "pinned": False,
                     "uploaded_at": None,
                     "pages_parsed": None,
-                    "child_chunks": None
+                    "child_chunks": None,
+                    "user_id": None,
+                    "is_global": True
                 })
     return {"documents": docs, "total": len(docs)}
 
 
 @app.delete("/api/v1/documents/{filename}")
-async def delete_document_endpoint(filename: str):
-    """Delete a document from the vault, disk, BM25 index, and parent store."""
+async def delete_document_endpoint(filename: str, raw_request: Request):
+    """Delete a document from the vault, verifying user authorization."""
+    user_id = get_current_user_id(raw_request)
     safe_filename = Path(filename).name
+
+    doc_meta = app.state.vault_meta.get(safe_filename)
+    if doc_meta:
+        doc_user = doc_meta.get("user_id")
+        # Only owner can delete their private file
+        if doc_user and user_id and doc_user != user_id:
+            raise HTTPException(status_code=403, detail="Forbidden: You cannot delete another user's document.")
+
     pdf_path = (settings.RAW_DOCS_DIR / safe_filename).resolve()
     if not pdf_path.is_relative_to(settings.RAW_DOCS_DIR.resolve()) or not pdf_path.exists():
         raise HTTPException(status_code=404, detail=f"Document '{safe_filename}' not found.")
@@ -501,7 +645,7 @@ async def delete_document_endpoint(filename: str):
 
 
 @app.post("/api/v1/documents/{filename}/pin")
-async def pin_document_endpoint(filename: str):
+async def pin_document_endpoint(filename: str, raw_request: Request):
     """Pin a document to the Vault - it will survive server restarts."""
     safe_filename = Path(filename).name
     if safe_filename not in app.state.vault_meta:
@@ -512,7 +656,7 @@ async def pin_document_endpoint(filename: str):
 
 
 @app.post("/api/v1/documents/{filename}/unpin")
-async def unpin_document_endpoint(filename: str):
+async def unpin_document_endpoint(filename: str, raw_request: Request):
     """Unpin a document - it will be auto-cleaned on next server restart."""
     safe_filename = Path(filename).name
     if safe_filename not in app.state.vault_meta:
@@ -523,7 +667,7 @@ async def unpin_document_endpoint(filename: str):
 
 
 # ---------------------------------------------------------------------------
-# Answer History
+# Answer History (Tenant-Scoped: SEC-00, SEC-04)
 # ---------------------------------------------------------------------------
 
 class HistoryAddRequest(BaseModel):
@@ -536,8 +680,9 @@ class HistoryAddRequest(BaseModel):
 
 
 @app.post("/api/v1/history/add")
-async def add_history_entry(item: HistoryAddRequest):
-    """Record a synthesized Q&A into server history."""
+async def add_history_entry(item: HistoryAddRequest, raw_request: Request):
+    """Record a synthesized Q&A into persistent tenant history."""
+    user_id = get_current_user_id(raw_request)
     entry = {
         "id": str(uuid.uuid4()),
         "question": item.question,
@@ -546,30 +691,46 @@ async def add_history_entry(item: HistoryAddRequest):
         "module_filter": item.module_filter,
         "generated_answer": item.generated_answer,
         "citations": item.citations,
-        "timestamp": datetime.now().isoformat()
+        "timestamp": datetime.now().isoformat(),
+        "user_id": user_id
     }
     app.state.answer_history.append(entry)
+    _save_answer_history(app.state.answer_history, user_id=user_id)
     return {"status": "saved", "id": entry["id"]}
 
 
 @app.get("/api/v1/history")
-async def get_history():
-    """Return all Q&As answered in this server session (most recent first)."""
+async def get_history(raw_request: Request):
+    """Return all Q&As answered for this user (most recent first)."""
+    user_id = get_current_user_id(raw_request)
+    filtered = [
+        h for h in reversed(app.state.answer_history)
+        if (not user_id) or (h.get("user_id") == user_id)
+    ]
     return {
-        "history": list(reversed(app.state.answer_history)),
-        "total": len(app.state.answer_history)
+        "history": filtered,
+        "total": len(filtered)
     }
 
 
 @app.delete("/api/v1/history")
-async def clear_history():
-    """Clear the in-memory answer history for this session."""
-    app.state.answer_history.clear()
+async def clear_history(raw_request: Request):
+    """Clear answer history for the requesting user."""
+    user_id = get_current_user_id(raw_request)
+    if user_id:
+        app.state.answer_history = deque(
+            [h for h in app.state.answer_history if h.get("user_id") != user_id],
+            maxlen=200
+        )
+        _save_answer_history(app.state.answer_history, user_id=user_id)
+    else:
+        app.state.answer_history.clear()
+        _save_answer_history([], user_id=None)
     return {"status": "cleared"}
 
 
 # ---------------------------------------------------------------------------
-# Question Bank
+# Question Bank (Tenant-Scoped)
 # ---------------------------------------------------------------------------
 
 class BankSaveRequest(BaseModel):
@@ -582,17 +743,23 @@ class BankSaveRequest(BaseModel):
 
 
 @app.get("/api/v1/bank")
-async def get_question_bank():
-    """Return all saved Q&As in the persistent question bank."""
+async def get_question_bank(raw_request: Request):
+    """Return saved Q&As for the current user and public question bank."""
+    user_id = get_current_user_id(raw_request)
+    filtered = [
+        q for q in app.state.question_bank
+        if (not user_id) or (q.get("user_id") == user_id) or (q.get("user_id") is None)
+    ]
     return {
-        "bank": app.state.question_bank,
-        "total": len(app.state.question_bank)
+        "bank": filtered,
+        "total": len(filtered)
     }
 
 
 @app.post("/api/v1/bank/save")
-async def save_to_bank(req: BankSaveRequest):
-    """Save a Q&A to the persistent question bank."""
+async def save_to_bank(req: BankSaveRequest, raw_request: Request):
+    """Save a Q&A to the persistent question bank with tenant scoping."""
+    user_id = get_current_user_id(raw_request)
     item = {
         "id": str(uuid.uuid4()),
         "question": req.question,
@@ -601,10 +768,11 @@ async def save_to_bank(req: BankSaveRequest):
         "generated_answer": req.generated_answer,
         "citations": req.citations,
         "tags": req.tags,
-        "saved_at": datetime.now().isoformat()
+        "saved_at": datetime.now().isoformat(),
+        "user_id": user_id
     }
     app.state.question_bank.append(item)
-    _save_question_bank(app.state.question_bank)
+    _save_question_bank(app.state.question_bank, user_id=user_id)
     return {"status": "saved", "id": item["id"]}
 
 
