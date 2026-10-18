@@ -689,6 +689,24 @@ export default function App() {
   const [copied, setCopied] = useState(false);
   const typingRef = useRef(null);
 
+  // ChatGPT-style Effort Selector Popover State
+  const [effortPopoverOpen, setEffortPopoverOpen] = useState(false);
+  const effortPopoverRef = useRef(null);
+
+  useEffect(() => {
+    function handleClickOutside(event) {
+      if (effortPopoverRef.current && !effortPopoverRef.current.contains(event.target)) {
+        if (!event.target.closest('.chatgpt-effort-trigger-btn')) {
+          setEffortPopoverOpen(false);
+        }
+      }
+    }
+    if (effortPopoverOpen) {
+      document.addEventListener('mousedown', handleClickOutside);
+      return () => document.removeEventListener('mousedown', handleClickOutside);
+    }
+  }, [effortPopoverOpen]);
+
   // History State
   const [history, setHistory] = useState([]);
   const [historyLoading, setHistoryLoading] = useState(false);
@@ -924,9 +942,14 @@ export default function App() {
     }, 14);
   };
 
-  const handleQASubmit = async (e) => {
-    e?.preventDefault();
-    if (!question.trim() || qaLoading) return;
+  const handleQASubmit = async (e, overrideQ = null, overrideMarks = null) => {
+    if (e && typeof e.preventDefault === 'function') e.preventDefault();
+    const qToUse = (typeof overrideQ === 'string' ? overrideQ : question).trim();
+    const marksToUse = typeof overrideMarks === 'number' ? overrideMarks : targetMarks;
+    if (!qToUse || qaLoading) return;
+    if (overrideQ) setQuestion(overrideQ);
+    if (overrideMarks) setTargetMarks(overrideMarks);
+    setEffortPopoverOpen(false);
     setQaLoading(true);
     setQaResult(null);
     setDisplayedAnswer('');
@@ -942,10 +965,10 @@ export default function App() {
         method: 'POST',
         headers,
         body: JSON.stringify({
-          question,
+          question: qToUse,
           subject: subject === 'All Subjects' ? null : subject,
           module_filter: moduleFilter ? parseInt(moduleFilter) : null,
-          target_marks: targetMarks
+          target_marks: marksToUse
         })
       });
 
@@ -988,8 +1011,8 @@ export default function App() {
       }
 
       const newResult = {
-        question,
-        target_marks: targetMarks,
+        question: qToUse,
+        target_marks: marksToUse,
         generated_answer: fullText,
         citations,
         retrieval_latency_ms: 0
@@ -1000,8 +1023,8 @@ export default function App() {
       if (fullText) {
         const histEntry = {
           id: String(Date.now()),
-          question,
-          target_marks: targetMarks,
+          question: qToUse,
+          target_marks: marksToUse,
           subject,
           module_filter: moduleFilter ? parseInt(moduleFilter) : null,
           generated_answer: fullText,
@@ -1019,7 +1042,7 @@ export default function App() {
           await fetch(`${API_BASE}/api/v1/history/add`, {
             method: 'POST',
             headers: addHeaders,
-            body: JSON.stringify({ question, subject, target_marks: targetMarks, generated_answer: fullText, citations })
+            body: JSON.stringify({ question: qToUse, subject, target_marks: marksToUse, generated_answer: fullText, citations })
           });
         } catch { /* non-critical */ }
       }
@@ -1404,156 +1427,350 @@ export default function App() {
         </header>
 
         <main className="page-content">
-          {/* TAB 1: SYNTHESIZE ANSWER */}
+          {/* TAB 1: SYNTHESIZE ANSWER (CHATGPT CONVERSATIONAL WORKSPACE) */}
           {tab === 'qa' && (
-            <div className="tab-content">
-              <div className="page-header">
-                <h2 className="page-title gradient-title">Synthesize Answer</h2>
-                <p className="page-subtitle">Ask any university exam question — synthesized with LaTeX formulas, step-by-step derivations, and citations.</p>
-              </div>
+            <div className="tab-content chatgpt-qa-container">
+              {/* Central Stream Area */}
+              <div className="chatgpt-stream-scroll">
+                <div className="chatgpt-stream-content">
 
-              <div className="qa-grid">
-                <div className="glass-panel-elevated" style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 14 }}>
-                  <div>
-                    <label className="field-label">Question</label>
-                    <textarea
-                      key="qa-question-box"
-                      className="textarea-field"
-                      placeholder="Type your exam question (e.g. Explain SVM dual optimization formulation)..."
-                      value={question}
-                      onChange={e => setQuestion(e.target.value)}
-                      onKeyDown={e => { if (e.key === 'Enter' && e.ctrlKey) handleQASubmit(); }}
-                      style={{ minHeight: 110 }}
-                    />
-                  </div>
-
-                  {/* ChatGPT-Inspired Reasoning Effort & Target Marks Stepper */}
-                  <div className="effort-selector-widget">
-                    <div className="effort-selector-header">
-                      <div className="effort-selector-title">
-                        <Zap size={14} className="effort-icon" />
-                        <span>Reasoning Effort & Target Marks</span>
+                  {/* Empty Hero State (Before Asking Query) */}
+                  {!displayedAnswer && !qaLoading && (
+                    <div className="chatgpt-hero-landing">
+                      <div className="chatgpt-hero-icon">
+                        <Zap size={26} />
                       </div>
-                      <div className="model-chip">
-                        <span className="model-chip-dot"></span>
-                        <span>Gemini 3.7 Flash + Qdrant</span>
-                      </div>
-                    </div>
+                      <h2 className="chatgpt-hero-title">What university question are we solving today?</h2>
+                      <p className="chatgpt-hero-subtitle">
+                        Exam-calibrated synthesis with step-by-step LaTeX math, structured tables, and citations from your university course documents.
+                      </p>
 
-                    <div className="effort-stepper-track">
-                      {[
-                        { marks: 2, label: '2 Marks', desc: 'Quick Definition', detail: 'Concise (~1.5s)' },
-                        { marks: 5, label: '5 Marks', desc: 'Concept Breakdown', detail: 'Structured Tables' },
-                        { marks: 10, label: '10 Marks', desc: 'Deep Derivation', detail: 'Full Math + Mermaid' },
-                      ].map(tier => {
-                        const active = targetMarks === tier.marks;
-                        return (
+                      <div className="chatgpt-suggestions-grid">
+                        {[
+                          { q: 'Explain SVM dual optimization formulation and KKT slack conditions.', marks: 10, tag: '10 Marks' },
+                          { q: 'Compare TCP Reno vs Tahoe congestion avoidance mechanisms with phase comparison.', marks: 5, tag: '5 Marks' },
+                          { q: 'Derive Backpropagation gradient weight updates for a 2-layer neural network.', marks: 10, tag: '10 Marks' },
+                          { q: 'State Dynamic Programming optimal substructure and overlapping subproblems.', marks: 2, tag: '2 Marks' }
+                        ].map((s, idx) => (
                           <button
-                            key={tier.marks}
+                            key={idx}
                             type="button"
-                            className={`effort-step-node ${active ? 'active' : ''}`}
-                            onClick={() => setTargetMarks(tier.marks)}
+                            className="chatgpt-suggestion-card"
+                            onClick={() => {
+                              setQuestion(s.q);
+                              setTargetMarks(s.marks);
+                              handleQASubmit(null, s.q, s.marks);
+                            }}
                           >
-                            <div className="step-node-top">
-                              <span className="step-bullet"></span>
-                              <span className="step-label">{tier.label}</span>
+                            <span className="suggestion-text">{s.q}</span>
+                            <div className="suggestion-footer">
+                              <span className="suggestion-badge">{s.tag}</span>
+                              <span className="suggestion-arrow">→</span>
                             </div>
-                            <span className="step-desc">{tier.desc}</span>
-                            <span className="step-detail">{tier.detail}</span>
                           </button>
-                        );
-                      })}
-                    </div>
-                  </div>
-
-                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, alignItems: 'center' }}>
-                    <div>
-                      <label className="field-label">Module Filter</label>
-                      <input className="input-field" type="number" placeholder="e.g. 3 (optional)" value={moduleFilter} onChange={e => setModuleFilter(e.target.value)} min={1} max={8} />
-                    </div>
-                    <div>
-                      <label className="field-label">Active Subject</label>
-                      <div className="badge-tag badge-cyan" style={{ height: 38, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '0.8rem', fontWeight: 600 }}>
-                        {subject}
-                      </div>
-                    </div>
-                  </div>
-
-                  <button className="btn btn-primary" style={{ width: '100%' }} onClick={handleQASubmit} disabled={qaLoading || !question.trim()}>
-                    {qaLoading ? <RefreshCw size={16} className="animate-spin" /> : <Send size={16} />}
-                    {qaLoading ? 'Synthesizing Answer...' : 'Generate Answer'}
-                  </button>
-                  <p style={{ textAlign: 'center', fontSize: '0.72rem', color: 'var(--text-muted)' }}>Ctrl+Enter to submit query</p>
-                </div>
-
-                <div className="glass-panel-elevated" style={{ display: 'flex', flexDirection: 'column' }}>
-                  <div className="answer-toolbar">
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                      <Sparkles size={16} style={{ color: '#FAFAFA' }} />
-                      <span style={{ fontSize: '0.86rem', fontWeight: 600 }}>
-                        {qaLoading ? 'Synthesizing...' : qaResult ? `${targetMarks}-Mark Answer` : 'Generated Answer'}
-                      </span>
-                      {qaResult && <span className="badge-tag badge-cyan">{qaResult.retrieval_latency_ms}ms</span>}
-                      {isTyping && <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>streaming...</span>}
-                    </div>
-                    {qaResult && (
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                        <button className="btn btn-ghost btn-icon-square" onClick={copyAnswer} title="Copy answer">
-                          {copied ? <Check size={14} style={{ color: 'var(--emerald)' }} /> : <Copy size={14} />}
-                        </button>
-                        <button className="btn btn-ghost btn-icon-square" onClick={() => window.print()} title="Print as PDF">
-                          <Printer size={14} />
-                        </button>
-                        <button className="btn btn-ghost btn-icon-square" onClick={saveToBank} title="Save to Question Bank">
-                          <BookMarked size={14} />
-                        </button>
-                        {isTyping && (
-                          <button className="btn btn-ghost" style={{ fontSize: '0.70rem', padding: '3px 8px' }} onClick={() => { clearInterval(typingRef.current); setDisplayedAnswer(qaResult.generated_answer); setIsTyping(false); }}>
-                            Skip
-                          </button>
-                        )}
-                      </div>
-                    )}
-                  </div>
-
-                  <div className="answer-body">
-                    {qaLoading && !displayedAnswer && (
-                      <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-                        {[85, 65, 92, 55, 78].map((w, i) => (
-                          <div key={i} className="skeleton" style={{ height: 13, width: `${w}%` }} />
                         ))}
                       </div>
-                    )}
-                    {displayedAnswer && (
-                      <div>
-                        <RenderMarkdown text={displayedAnswer} />
-                        {isTyping && <span className="typewriter-cursor" />}
-                      </div>
-                    )}
-                    {!qaLoading && !displayedAnswer && (
-                      <div className="glass-panel-inset text-center text-xs text-muted" style={{ padding: 36, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 10 }}>
-                        <div className="empty-icon" style={{ width: 38, height: 38 }}><Send size={16} style={{ color: '#38BDF8' }} /></div>
-                        <p style={{ fontSize: '0.90rem', fontWeight: 600, color: '#FAFAFA' }}>Your synthesized answer will appear here</p>
-                        <p style={{ fontSize: '0.78rem', color: '#71717A' }}>Grounded in your uploaded university course notes and PYQs</p>
-                      </div>
-                    )}
-                  </div>
-
-                  {qaResult?.citations?.length > 0 && (
-                    <div style={{ padding: '12px 20px', borderTop: '1px solid var(--border-subtle)', display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' }}>
-                      <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.04em' }}>Citations:</span>
-                      {qaResult.citations.map((c, i) => (
-                        <span key={i} className="citation-pill">
-                          <FileText size={11} />
-                          {c.source}{c.module_number ? ` · M${c.module_number}` : ''}{c.page_number ? ` · p${c.page_number}` : ''}
-                        </span>
-                      ))}
                     </div>
                   )}
+
+                  {/* Loading State Skeleton */}
+                  {qaLoading && !displayedAnswer && (
+                    <div className="chatgpt-turn assistant-turn">
+                      <div className="turn-avatar ai-avatar"><Sparkles size={16} /></div>
+                      <div style={{ flex: 1 }}>
+                        <div className="chatgpt-thinking-pill" style={{ marginBottom: 14 }}>
+                          <RefreshCw size={12} className="animate-spin" />
+                          <span>Searching Qdrant dense vectors & synthesizing {targetMarks}-mark response...</span>
+                        </div>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                          {[88, 72, 94, 60, 80].map((w, i) => (
+                            <div key={i} className="skeleton" style={{ height: 14, width: `${w}%` }} />
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Generated Answer Thread */}
+                  {displayedAnswer && (
+                    <div className="chatgpt-conversation-thread">
+                      {/* User Turn */}
+                      <div className="chatgpt-turn user-turn">
+                        <div className="turn-avatar user-avatar"><User size={16} /></div>
+                        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', maxWidth: '85%' }}>
+                          <div className="user-question-bubble">
+                            {qaResult?.question || question}
+                          </div>
+                          <div className="user-turn-meta">
+                            <span className="badge-tag badge-cyan">{targetMarks} Marks</span>
+                            {moduleFilter && <span className="badge-tag badge-indigo">Module {moduleFilter}</span>}
+                            <span className="badge-tag">{subject}</span>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Assistant Turn: Main Answer + Outputs & Sources Sidebar (Matching Screenshot) */}
+                      <div className="chatgpt-response-layout">
+                        {/* Main Synthesized Answer */}
+                        <div className="main-answer-card">
+                          <div className="turn-header-row">
+                            <div className="turn-avatar ai-avatar"><Sparkles size={16} /></div>
+                            <div className="chatgpt-thinking-pill">
+                              <Zap size={13} style={{ color: '#06B6D4' }} />
+                              <span>Synthesized {targetMarks}-Mark Solution {qaResult?.retrieval_latency_ms ? `· ${qaResult.retrieval_latency_ms}ms` : ''}</span>
+                            </div>
+                            {isTyping && <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>streaming...</span>}
+                          </div>
+
+                          <div className="answer-prose">
+                            <RenderMarkdown text={displayedAnswer} />
+                            {isTyping && <span className="typewriter-cursor" />}
+                          </div>
+
+                          {/* Toolbar Actions */}
+                          <div className="chatgpt-actions-toolbar">
+                            <button className="chatgpt-action-btn" onClick={copyAnswer} title="Copy Answer">
+                              {copied ? <Check size={14} style={{ color: 'var(--emerald)' }} /> : <Copy size={14} />}
+                              <span>{copied ? 'Copied' : 'Copy'}</span>
+                            </button>
+                            <button className="chatgpt-action-btn" onClick={() => window.print()} title="Print as PDF">
+                              <Printer size={14} />
+                              <span>Print PDF</span>
+                            </button>
+                            <button className="chatgpt-action-btn" onClick={saveToBank} title="Save to Question Bank">
+                              <BookMarked size={14} />
+                              <span>Save to Bank</span>
+                            </button>
+                            {isTyping && (
+                              <button className="chatgpt-action-btn" onClick={() => { clearInterval(typingRef.current); setDisplayedAnswer(qaResult?.generated_answer || displayedAnswer); setIsTyping(false); }}>
+                                <span>Skip Typing</span>
+                              </button>
+                            )}
+                          </div>
+                        </div>
+
+                        {/* Right Sidebar: Outputs & Sources (Exact Screenshot Design) */}
+                        <aside className="chatgpt-sidebar-panel">
+                          {/* Outputs Card */}
+                          <div className="chatgpt-side-section">
+                            <div className="side-section-header">
+                              <span>Outputs</span>
+                              <span style={{ fontSize: '0.70rem', color: 'var(--text-dim)' }}>2 items</span>
+                            </div>
+                            <div className="side-item-list">
+                              <div className="side-item-card" onClick={() => window.print()} title="Print / Export Solution PDF">
+                                <FileText size={15} className="side-icon-pdf" />
+                                <div className="side-item-info">
+                                  <span className="side-item-title">{`Solution_${targetMarks}M_${subject}.pdf`}</span>
+                                  <span className="side-item-sub">Ready to print</span>
+                                </div>
+                              </div>
+                              <div className="side-item-card" onClick={saveToBank} title="Save question & answer to question bank">
+                                <BookMarked size={15} className="side-icon-doc" />
+                                <div className="side-item-info">
+                                  <span className="side-item-title">Question_Bank_Entry</span>
+                                  <span className="side-item-sub">Revision Deck</span>
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+
+                          {/* Sources Card */}
+                          <div className="chatgpt-side-section">
+                            <div className="side-section-header">
+                              <span>Sources ({qaResult?.citations?.length || 0})</span>
+                              <span className="side-section-badge">Grounding</span>
+                            </div>
+                            <div className="side-item-list">
+                              {qaResult?.citations && qaResult.citations.length > 0 ? (
+                                qaResult.citations.map((c, i) => (
+                                  <div key={i} className="side-item-card" title={`${c.source} · Module ${c.module_number || 1} · Page ${c.page_number || 1}`}>
+                                    <FileText size={15} className="side-icon-source" />
+                                    <div className="side-item-info">
+                                      <span className="side-item-title">{c.source}</span>
+                                      <span className="side-item-sub">
+                                        {c.module_number ? `Mod ${c.module_number}` : 'Notes'} {c.page_number ? `· p.${c.page_number}` : ''}
+                                      </span>
+                                    </div>
+                                  </div>
+                                ))
+                              ) : (
+                                <div className="side-item-card empty">
+                                  <span className="side-item-sub">University syllabus reference</span>
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        </aside>
+                      </div>
+                    </div>
+                  )}
+
+                </div>
+              </div>
+
+              {/* Fixed Bottom Input Bar (ChatGPT-style!) */}
+              <div className="chatgpt-bottom-bar-container">
+                <div className="chatgpt-input-box">
+
+                  {/* Floating Horizontal Effort Slider Popover (Exact Match to Screenshot!) */}
+                  {effortPopoverOpen && (
+                    <div className="chatgpt-effort-popover" ref={effortPopoverRef}>
+                      <div className="popover-top-row">
+                        <Zap size={16} className="popover-zap-icon" />
+                        <div className="popover-level-info">
+                          <span className="popover-level-title">
+                            {targetMarks === 2 ? 'Low' : targetMarks === 5 ? 'Medium' : 'High'}
+                          </span>
+                          <span className="popover-level-sub">
+                            {targetMarks === 2 && '2 Marks · Quick Definition'}
+                            {targetMarks === 5 && '5 Marks · Concept Breakdown'}
+                            {targetMarks === 10 && '10 Marks · Deep Derivation'}
+                            {' >'}
+                          </span>
+                        </div>
+                        <button
+                          type="button"
+                          className="popover-reset-btn"
+                          title="Reset to 5 Marks"
+                          onClick={() => setTargetMarks(5)}
+                        >
+                          <RotateCcw size={13} />
+                        </button>
+                      </div>
+
+                      {/* Horizontal Slider Track with dots and circular thumb */}
+                      <div className="popover-slider-wrapper">
+                        <div
+                          className="popover-track-bar"
+                          onClick={e => {
+                            const rect = e.currentTarget.getBoundingClientRect();
+                            const clickX = e.clientX - rect.left;
+                            const ratio = clickX / rect.width;
+                            if (ratio < 0.33) setTargetMarks(2);
+                            else if (ratio < 0.67) setTargetMarks(5);
+                            else setTargetMarks(10);
+                          }}
+                        >
+                          {/* Filled progress bar */}
+                          <div
+                            className="popover-track-fill"
+                            style={{
+                              width: targetMarks === 2 ? '0%' : targetMarks === 5 ? '50%' : '100%'
+                            }}
+                          />
+                          {/* White circular slider thumb knob */}
+                          <div
+                            className="popover-slider-thumb"
+                            style={{
+                              left: targetMarks === 2 ? '0%' : targetMarks === 5 ? '50%' : '100%'
+                            }}
+                          />
+                        </div>
+
+                        {/* Discrete level stops */}
+                        <div className="popover-stops-row">
+                          {[
+                            { marks: 2, label: 'Low', sub: '2M' },
+                            { marks: 5, label: 'Medium', sub: '5M' },
+                            { marks: 10, label: 'High', sub: '10M' }
+                          ].map(tier => (
+                            <button
+                              key={tier.marks}
+                              type="button"
+                              className={`popover-stop-btn ${targetMarks === tier.marks ? 'active' : ''}`}
+                              onClick={() => setTargetMarks(tier.marks)}
+                            >
+                              <span className="stop-dot" />
+                              <span className="stop-name">{tier.label} ({tier.sub})</span>
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Query Textarea */}
+                  <textarea
+                    key="chatgpt-qa-input"
+                    className="chatgpt-textarea"
+                    placeholder="Ask any university exam question... (Enter to send, Shift+Enter for newline)"
+                    value={question}
+                    onChange={e => setQuestion(e.target.value)}
+                    onKeyDown={e => {
+                      if (e.key === 'Enter' && !e.shiftKey) {
+                        e.preventDefault();
+                        handleQASubmit();
+                      }
+                    }}
+                    rows={question.split('\n').length > 2 ? Math.min(question.split('\n').length, 5) : 2}
+                  />
+
+                  {/* Input Footer Controls */}
+                  <div className="chatgpt-input-footer">
+                    {/* Left Tools: Subject & Module */}
+                    <div className="chatgpt-input-tools-left">
+                      <div className="chatgpt-pill-tool" title="Active Subject">
+                        <BookOpen size={12} />
+                        <span>{subject}</span>
+                      </div>
+                      <div className="chatgpt-module-selector" title="Filter by Module">
+                        <span>Mod:</span>
+                        <select
+                          className="chatgpt-module-select"
+                          value={moduleFilter}
+                          onChange={e => setModuleFilter(e.target.value)}
+                        >
+                          <option value="">All</option>
+                          {[1, 2, 3, 4, 5, 6, 7, 8].map(m => (
+                            <option key={m} value={m}>M{m}</option>
+                          ))}
+                        </select>
+                      </div>
+                    </div>
+
+                    {/* Right Tools: Compact Effort Selector Pill + Send Button */}
+                    <div className="chatgpt-input-tools-right">
+                      {/* Compact Effort Selector Trigger */}
+                      <button
+                        type="button"
+                        className={`chatgpt-effort-trigger-btn ${effortPopoverOpen ? 'active' : ''}`}
+                        onClick={() => setEffortPopoverOpen(o => !o)}
+                        title="Select Reasoning Effort & Target Marks"
+                      >
+                        <Zap size={13} className="trigger-zap-icon" />
+                        <span className="trigger-text">
+                          {targetMarks === 2 ? 'Low · 2M' : targetMarks === 5 ? 'Medium · 5M' : 'High · 10M'}
+                        </span>
+                        <ChevronDown size={13} className={`trigger-chevron ${effortPopoverOpen ? 'rotate-180' : ''}`} />
+                      </button>
+
+                      {/* Send Button */}
+                      <button
+                        type="button"
+                        className="chatgpt-send-btn"
+                        onClick={handleQASubmit}
+                        disabled={qaLoading || !question.trim()}
+                        title="Synthesize Answer (Enter)"
+                      >
+                        {qaLoading ? (
+                          <RefreshCw size={15} className="animate-spin" />
+                        ) : (
+                          <Send size={15} />
+                        )}
+                      </button>
+                    </div>
+                  </div>
+
+                </div>
+
+                <div className="chatgpt-disclaimer">
+                  Eduniti AI may produce approximations · Verify key derivations with official university notes
                 </div>
               </div>
             </div>
           )}
+
 
           {/* TAB 2: ANSWER HISTORY */}
           {tab === 'history' && (
