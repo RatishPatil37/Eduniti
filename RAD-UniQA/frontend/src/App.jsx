@@ -444,6 +444,28 @@ function normalizeMarkdown(rawText) {
   });
 
   // ═══════════════════════════════════════════════════════════════════════════
+  // PHASE 0.5 — Strip accidental 4-space code-block indentation for math/prose
+  // CommonMark treats 4 leading spaces as an indented code block (<pre><code>).
+  // If an LLM indents derivations under numbered list items with 4 spaces,
+  // Markdown suppresses math rendering and shows it in a raw grey code pill.
+  // ═══════════════════════════════════════════════════════════════════════════
+  text = text.replace(/^[ \t]{2,}(?=(?:Let\s+[\$\\]|Given\s+[\$\\]|Where\s+[\$\\]|\$|\\begin\{|\\mathcal|\\mathbf|\\frac|\\sigma|\\partial|[a-zA-Z_0-9^=+\-*/\s]+\s*=\s*\\begin\{))/gm, '');
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // PHASE 0.6 — Matrix Normalization:
+  // 1. Fix single-backslash row breaks inside matrices: "1.1 \ 0.0" -> "1.1 \\ 0.0"
+  // 2. Promote inline matrices ($...\\begin{bmatrix}...$) to display $$...$$ blocks
+  // ═══════════════════════════════════════════════════════════════════════════
+  text = text.replace(/(\\begin\{(?:[bBpvV]?matrix|aligned|cases)\}[\s\S]*?\\end\{(?:[bBpvV]?matrix|aligned|cases)\})/g, (match) => {
+    return match.replace(/([0-9a-zA-Z_}.)\]])\s*\\(?!\\|[a-zA-Z])\s*([-0-9a-zA-Z_{([&])/g, '$1 \\\\ $2');
+  });
+
+  text = text.replace(/(?:^|\n)([ \t]*)(?:(Let|Given|Where|Here)\s+)?\$([^\n$]*?\\begin\{(?:[bBpvV]?matrix|aligned|cases)\}[\s\S]*?\\end\{(?:[bBpvV]?matrix|aligned|cases)\}[^\n$]*?)\$[\.,;: ]*/gi, (match, indent, prefix, mathContent) => {
+    const lead = prefix ? `${prefix}:` : '';
+    return `\n\n${lead}\n\n$$\n${mathContent.trim()}\n$$\n\n`;
+  });
+
+  // ═══════════════════════════════════════════════════════════════════════════
   // 1. Auto-correct LLM LaTeX typos & KaTeX-incompatible macros
   // ═══════════════════════════════════════════════════════════════════════════
   text = text.replace(/\\left\\floor\b/g, '\\left\\lfloor');
@@ -557,14 +579,32 @@ function normalizeMarkdown(rawText) {
         /^\d+\./.test(trimmed)
       ) { out.push(line); continue; }
 
-      const hasLatexCmd = /\\(mathcal|mathbf|mathbb|frac|partial|sum|int|nabla|sigma|Sigma|alpha|beta|gamma|theta|lambda|mu|delta|Delta|omega|Omega|left|right|sqrt|hat|vec|cdot|times|odot|prod|approx|sim|le|ge|in|to|implies|tanh|sin|cos|exp|log|ln|infty|lfloor|rfloor|lceil|rceil|perp|top)\b/.test(trimmed);
+      // Check if line starts a multi-line or single-line \begin{...matrix|aligned|cases}
+      if (trimmed.includes('\\begin{') && !trimmed.startsWith('$')) {
+        const envLines = [line];
+        if (!trimmed.includes('\\end{')) {
+          while (i + 1 < eqLines.length) {
+            i++;
+            envLines.push(eqLines[i]);
+            if (eqLines[i].includes('\\end{')) break;
+          }
+        }
+        out.push('');
+        out.push('$$');
+        out.push(envLines.join('\n').trim());
+        out.push('$$');
+        out.push('');
+        continue;
+      }
+
+      const hasLatexCmd = /\\(mathcal|mathbf|mathbb|frac|partial|sum|int|nabla|sigma|Sigma|alpha|beta|gamma|theta|lambda|mu|delta|Delta|omega|Omega|left|right|sqrt|hat|vec|cdot|times|odot|prod|approx|sim|le|ge|in|to|implies|tanh|sin|cos|exp|log|ln|infty|lfloor|rfloor|lceil|rceil|perp|top|operatorname|text|begin|end|matrix|bmatrix|pmatrix|vmatrix|aligned|cases)\b/.test(trimmed);
       const hasMathRel = /[=≈≤≥∈→⇒≡∝~]/.test(trimmed) || /\\(approx|le|ge|in|to|implies|sim|equiv)/.test(trimmed);
       const hasSubSuper = /[_^]\{?[a-zA-Z0-9+\-*=()]+\}?/.test(trimmed);
       const proseCount = (trimmed.match(/\b(the|is|are|where|with|we|let|for|and|in|because|have|substituting|therefore|which|then|defined|as|by|from|using|yields|such|that)\b/gi) || []).length;
 
       const isNakedMath = !trimmed.startsWith('$') && proseCount <= 1 && (
         (hasLatexCmd && (hasMathRel || trimmed.startsWith('\\') || /^[a-zA-Z]\s*=/.test(trimmed) || trimmed.startsWith('f('))) ||
-        (hasMathRel && hasSubSuper && /^[a-zA-Z0-9()\[\]\\_^{}\s=+*/\-]+$/.test(trimmed))
+        (hasMathRel && hasSubSuper && /^[a-zA-Z0-9()\[\]\\_^{}\s=+*/\-.,;&|]+$/.test(trimmed))
       );
 
       if (isNakedMath) {

@@ -51,6 +51,13 @@ CORE FORMATTING & SYNTAX RULES (CRITICAL):
      - $W_f, U_f$: Weight parameter matrices
      - $b_f$: Bias vector
      - $\\sigma$: Logistic sigmoid activation function
+   - MATRIX & VECTOR FORMULATION (MANDATORY DISPLAY BLOCKS):
+     * All matrices and vectors using environments (`\\begin{{bmatrix}}`, `\\begin{{pmatrix}}`, `\\begin{{matrix}}`, `\\begin{{aligned}}`, `\\begin{{cases}}`) MUST ALWAYS be enclosed in dedicated `$$...$$` display blocks with blank lines around them.
+     * NEVER embed matrices inside inline `$ ... $` or inside code blocks.
+     * Matrix rows MUST always be separated by `\\\\` (double backslash). Never use a single backslash for row breaks.
+     * Example:
+       $$W_2 = \\begin{{bmatrix}} 1.0 & 0.0 \\\\ 0.0 & 1.0 \\end{{bmatrix}}$$
+     * NEVER indent mathematical formulas, derivations, or parameter definitions with 4 spaces or tabs (as that triggers Markdown code blocks).
    - NEVER write raw ASCII math symbols (always use `\\sum`, `\\times`, `\\alpha`, `\\beta`, `\\partial`, `\\cdot`, `\\sigma`, `\\odot` inside math mode).
 3. **MARKDOWN TABLES (STRICT GFM FORMAT):**
    - In technical comparisons / trade-offs, YOU MUST ALWAYS generate a fully-formed Markdown comparison table.
