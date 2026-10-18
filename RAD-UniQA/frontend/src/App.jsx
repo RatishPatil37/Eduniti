@@ -8,7 +8,7 @@ import {
   Trash2, Download, ChevronLeft, ChevronDown, ChevronUp,
   AlignLeft, Timer, Map, SplitSquareHorizontal, X, Menu,
   PanelLeftClose, PanelLeft, FileUp, Eye, MoreHorizontal,
-  Layers, Hash, Activity, Star, ArrowLeft, Play, Pause, RotateCcw,
+  Layers, Hash, Activity, Star, ArrowLeft, ArrowDown, Play, Pause, RotateCcw,
   LogOut, User, Maximize2, Minimize2
 } from 'lucide-react';
 import mermaid from 'mermaid';
@@ -45,27 +45,172 @@ const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:8000';
 // PURE UTILITY & SUBCOMPONENTS (Defined outside to avoid unmounting)
 // ============================================================
 
-// Sanitizes Mermaid code: auto-quotes unquoted bracket labels containing special characters
-function sanitizeMermaid(code) {
-  if (!code) return '';
-  let sanitized = code.trim();
-  
-  // Ensure diagram starts with standard definition
-  if (!sanitized.startsWith('flowchart') && !sanitized.startsWith('graph') && !sanitized.startsWith('sequenceDiagram') && !sanitized.startsWith('classDiagram')) {
-    sanitized = `flowchart TD\n${sanitized}`;
+// Sanitizes Mermaid code: converts LaTeX commands to clean unicode/text and fixes bracket labels
+function sanitizeMermaid(rawCode) {
+  if (!rawCode) return '';
+  let sanitized = rawCode.trim();
+
+  // Strip code fences if present inside
+  sanitized = sanitized.replace(/^```(?:mermaid)?/i, '').replace(/```$/, '').trim();
+
+  // Fix lines with odd number of quotes (unclosed string literal across newlines)
+  const rawLines = sanitized.split('\n');
+  const mergedLines = [];
+  let buffer = '';
+
+  for (let i = 0; i < rawLines.length; i++) {
+    const current = rawLines[i].trim();
+    if (!current) continue;
+
+    if (buffer) {
+      buffer += ' ' + current;
+      const quoteCount = (buffer.match(/"/g) || []).length;
+      if (quoteCount % 2 === 0) {
+        mergedLines.push(buffer);
+        buffer = '';
+      }
+    } else {
+      const quoteCount = (current.match(/"/g) || []).length;
+      if (quoteCount % 2 !== 0) {
+        buffer = current;
+      } else {
+        mergedLines.push(current);
+      }
+    }
+  }
+  if (buffer) mergedLines.push(buffer);
+  sanitized = mergedLines.join('\n');
+
+  // Replace common LaTeX math macros with clean Unicode representations
+  const latexToUnicode = [
+    [/\\sigma/g, 'σ'],
+    [/\\partial/g, '∂'],
+    [/\\delta/g, 'δ'],
+    [/\\Delta/g, 'Δ'],
+    [/\\odot/g, '⊙'],
+    [/\\alpha/g, 'α'],
+    [/\\beta/g, 'β'],
+    [/\\gamma/g, 'γ'],
+    [/\\theta/g, 'θ'],
+    [/\\lambda/g, 'λ'],
+    [/\\mu/g, 'μ'],
+    [/\\nabla/g, '∇'],
+    [/\\times/g, '×'],
+    [/\\cdot/g, '·'],
+    [/\\in/g, '∈'],
+    [/\\sum/g, 'Σ'],
+    [/\\mathbb\{R\}/g, 'R'],
+    [/\\mathbb\{[A-Z]\}/g, 'R'],
+    [/\\text\{([^}]+)\}/g, '$1'],
+    [/\\mathbf\{([^}]+)\}/g, '$1'],
+    [/\\hat\{([^}]+)\}/g, '$1^'],
+    [/\\vec\{([^}]+)\}/g, '$1'],
+    [/\\frac\{([^}]+)\}\{([^}]+)\}/g, '$1/$2'],
+    [/\\left\(/g, '('],
+    [/\\right\)/g, ')'],
+    [/\\left\[/g, '('],
+    [/\\right\]/g, ')'],
+  ];
+
+  for (const [regex, rep] of latexToUnicode) {
+    sanitized = sanitized.replace(regex, rep);
   }
 
-  // Quote unquoted brackets containing special characters (&, _, +, -, etc.)
-  // e.g. A[Input x_t & h_{t-1}] -> A["Input x_t & h_{t-1}"]
-  sanitized = sanitized.replace(/(\w+)\s*\[([^"\]]+?)\]/g, (match, id, text) => {
-    if (text.startsWith('"') && text.endsWith('"')) return match;
-    return `${id}["${text.replace(/"/g, "'")}"]`;
+  // Replace double pipes || or single pipes | inside labels with space
+  sanitized = sanitized.replace(/\|+/g, ' ');
+
+  // Strip single quotes inside equations like σ'(z) -> σ′(z)
+  sanitized = sanitized.replace(/'/g, '′');
+
+  // Strip any remaining backslashes
+  sanitized = sanitized.replace(/\\([a-zA-Z]+)/g, '$1');
+  sanitized = sanitized.replace(/\\/g, '');
+
+  // Line-by-line label sanitizer:
+  // Convert any inner brackets inside ["..."] to parentheses: ["z^[1]"] -> ["z^(1)"]
+  const lines = sanitized.split('\n');
+  const cleanLines = lines.map(line => {
+    let l = line.trim();
+    if (!l) return '';
+
+    // Match ["..."] definitions:
+    l = l.replace(/\["([^"\n]*)"\]/g, (match, inner) => {
+      const clean = inner.replace(/\[/g, '(').replace(/\]/g, ')').trim();
+      return `["${clean}"]`;
+    });
+
+    // Match unquoted [label] definitions if any:
+    l = l.replace(/([a-zA-Z0-9_-]+)\s*\[([^"\]\n]+)\]/g, (match, id, inner) => {
+      return `${id}["${inner.trim()}"]`;
+    });
+
+    return l;
   });
 
-  return sanitized;
+  let result = cleanLines.filter(Boolean).join('\n');
+  if (!/^(flowchart|graph|sequenceDiagram|classDiagram|stateDiagram|erDiagram|gantt)/i.test(result)) {
+    result = `flowchart TD\n${result}`;
+  }
+  return result;
 }
 
-// Mermaid renderer helper — handles ```mermaid blocks with Claude-Style Artifact Modal
+// Fallback visual pipeline diagram if Mermaid fails completely
+function FallbackFlowchart({ code }) {
+  const steps = useMemo(() => {
+    const list = [];
+    const lines = (code || '').split('\n');
+    for (const line of lines) {
+      const match = line.match(/(?:-->|---|==>)?\s*([a-zA-Z0-9_-]+)\s*\["?(.*?)"?\]/);
+      if (match && match[2]) {
+        const text = match[2].replace(/[\[\]"]/g, '').trim();
+        if (text && !list.some(s => s.label === text)) {
+          list.push({ id: match[1], label: text });
+        }
+      }
+    }
+    return list.length > 0 ? list : [{ id: '1', label: 'Architecture Pipeline' }];
+  }, [code]);
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 10, padding: '16px 8px', width: '100%', maxWidth: 660, margin: '0 auto' }}>
+      {steps.map((st, i) => (
+        <React.Fragment key={i}>
+          <div style={{
+            background: '#18181B',
+            border: '1px solid #3F3F46',
+            borderRadius: 10,
+            padding: '12px 18px',
+            width: '100%',
+            display: 'flex',
+            alignItems: 'center',
+            gap: 12,
+            boxShadow: '0 4px 16px rgba(0,0,0,0.35)'
+          }}>
+            <div style={{
+              width: 26, height: 26, borderRadius: '50%',
+              background: '#27272A', border: '1px solid #52525B',
+              color: '#FAFAFA', fontSize: '0.75rem', fontWeight: 700,
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              flexShrink: 0
+            }}>
+              {i + 1}
+            </div>
+            <div style={{ fontSize: '0.86rem', color: '#FAFAFA', fontWeight: 500, lineHeight: 1.45 }}>
+              {st.label}
+            </div>
+          </div>
+          {i < steps.length - 1 && (
+            <div style={{ color: '#71717A', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '2px 0' }}>
+              <ArrowDown size={15} />
+            </div>
+          )}
+        </React.Fragment>
+      ))}
+    </div>
+  );
+}
+
+// Mermaid renderer helper — handles ```mermaid blocks with Claude-Style Artifact Modal & Zoom Controls
 const MermaidBlock = memo(function MermaidBlock({ code }) {
   const ref = useRef(null);
   const modalRef = useRef(null);
@@ -73,19 +218,51 @@ const MermaidBlock = memo(function MermaidBlock({ code }) {
   const [error, setError] = useState(false);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [zoomLevel, setZoomLevel] = useState(1);
 
   const sanitizedCode = useMemo(() => sanitizeMermaid(code), [code]);
 
   useEffect(() => {
-    const id = `mg-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    mermaid.render(id, sanitizedCode)
-      .then(({ svg }) => {
-        setSvgContent(svg);
-        setError(false);
-      })
-      .catch(() => {
-        setError(true);
-      });
+    let isMounted = true;
+    const id = `mg-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
+
+    const renderDiagram = async () => {
+      try {
+        const { svg } = await mermaid.render(id, sanitizedCode);
+        if (isMounted) {
+          setSvgContent(svg);
+          setError(false);
+        }
+      } catch (err) {
+        console.warn('Initial Mermaid render error, attempting aggressive fallback...', err);
+        const errEl = document.getElementById(id) || document.getElementById('d' + id);
+        if (errEl) errEl.remove();
+
+        try {
+          // Secondary fallback: strip all non-alphanumeric punctuation inside node brackets
+          const fallbackCode = sanitizedCode.replace(/\["([^"]*)"\]/g, (_, inner) => {
+            const stripped = inner.replace(/[^a-zA-Z0-9 _:\-+=()]/g, ' ');
+            return `["${stripped.trim()}"]`;
+          });
+          const fbId = `mg-fb-${Date.now()}`;
+          const { svg } = await mermaid.render(fbId, fallbackCode);
+          if (isMounted) {
+            setSvgContent(svg);
+            setError(false);
+          }
+        } catch (fbErr) {
+          console.error('Mermaid fallback render failed, using interactive pipeline fallback:', fbErr);
+          const errEl2 = document.getElementById('d' + id);
+          if (errEl2) errEl2.remove();
+          if (isMounted) {
+            setError(true);
+          }
+        }
+      }
+    };
+
+    renderDiagram();
+    return () => { isMounted = false; };
   }, [sanitizedCode]);
 
   useEffect(() => {
@@ -98,7 +275,7 @@ const MermaidBlock = memo(function MermaidBlock({ code }) {
     if (modalRef.current && svgContent) {
       modalRef.current.innerHTML = svgContent;
     }
-  }, [svgContent, isModalOpen]);
+  }, [svgContent, isModalOpen, zoomLevel]);
 
   const handleCopy = () => {
     navigator.clipboard.writeText(code);
@@ -111,11 +288,17 @@ const MermaidBlock = memo(function MermaidBlock({ code }) {
       <div className="mermaid-wrap">
         <div className="mermaid-header">
           <span style={{ display: 'flex', alignItems: 'center', gap: 6, color: '#FAFAFA', fontWeight: 600 }}>
-            <GitFork size={14} style={{ color: '#38BDF8' }} /> Architecture Diagram
+            <GitFork size={14} style={{ color: '#E4E4E7' }} /> Architecture & Flowchart Diagram
           </span>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-            <button className="btn btn-ghost btn-icon-square" onClick={() => setIsModalOpen(true)} title="Expand Fullscreen View (Claude Artifact)">
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <button
+              type="button"
+              className="mermaid-zoom-btn-header"
+              onClick={() => { setZoomLevel(1); setIsModalOpen(true); }}
+              title="Zoom In & Expand Fullscreen Diagram"
+            >
               <Maximize2 size={13} />
+              <span>Zoom In</span>
             </button>
             <button className="btn btn-ghost btn-icon-square" onClick={handleCopy} title="Copy Mermaid Code">
               {copied ? <Check size={13} style={{ color: '#34D399' }} /> : <Copy size={13} />}
@@ -124,36 +307,83 @@ const MermaidBlock = memo(function MermaidBlock({ code }) {
         </div>
         <div className="mermaid-body" ref={ref}>
           {error ? (
-            <pre style={{ fontSize: '11px', color: '#FCA5A5', whiteSpace: 'pre-wrap', textAlign: 'left' }}>{code}</pre>
+            <FallbackFlowchart code={sanitizedCode} />
           ) : !svgContent ? (
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, color: 'var(--text-muted)', fontSize: '0.80rem' }}>
-              <RefreshCw size={14} className="animate-spin" /> Rendering diagram...
+              <RefreshCw size={14} className="animate-spin" /> Rendering flowchart...
             </div>
           ) : null}
         </div>
       </div>
 
-      {/* Claude-Style Artifact Modal Viewer */}
+      {/* Claude-Style Artifact Modal Viewer with Zoom In / Out */}
       {isModalOpen && (
         <div className="mermaid-modal-backdrop" onClick={() => setIsModalOpen(false)}>
           <div className="mermaid-modal-content" onClick={e => e.stopPropagation()}>
             <div className="mermaid-modal-header">
               <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                <GitFork size={16} style={{ color: '#38BDF8' }} />
+                <GitFork size={16} style={{ color: '#E4E4E7' }} />
                 <span style={{ fontSize: '0.94rem', fontWeight: 600, color: '#FAFAFA' }}>System Architecture & Flowchart</span>
               </div>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                {/* Zoom Controls */}
+                <button
+                  type="button"
+                  className="mermaid-zoom-btn"
+                  title="Zoom Out"
+                  onClick={() => setZoomLevel(z => Math.max(0.6, z - 0.2))}
+                >
+                  -
+                </button>
+                <span style={{ fontSize: '0.74rem', color: '#A1A1AA', minWidth: 36, textAlign: 'center' }}>
+                  {Math.round(zoomLevel * 100)}%
+                </span>
+                <button
+                  type="button"
+                  className="mermaid-zoom-btn"
+                  title="Zoom In"
+                  onClick={() => setZoomLevel(z => Math.min(2.5, z + 0.2))}
+                >
+                  +
+                </button>
+                <button
+                  type="button"
+                  className="mermaid-zoom-btn"
+                  title="Reset Zoom"
+                  onClick={() => setZoomLevel(1)}
+                  style={{ width: 'auto', padding: '0 8px', fontSize: '0.72rem' }}
+                >
+                  Reset
+                </button>
+
                 <button className="btn btn-ghost" onClick={handleCopy}>
                   {copied ? <Check size={13} style={{ color: '#34D399' }} /> : <Copy size={13} />}
-                  <span>{copied ? 'Copied' : 'Copy Code'}</span>
+                  <span>{copied ? 'Copied' : 'Copy'}</span>
                 </button>
                 <button className="btn btn-ghost btn-icon-square" onClick={() => setIsModalOpen(false)} title="Close">
                   <X size={15} />
                 </button>
               </div>
             </div>
-            <div className="mermaid-modal-body" ref={modalRef}>
-              {!svgContent && <div style={{ color: '#71717A' }}>Loading diagram...</div>}
+            <div className="mermaid-modal-body">
+              <div
+                style={{
+                  transform: `scale(${zoomLevel})`,
+                  transformOrigin: 'center center',
+                  transition: 'transform 0.18s ease',
+                  width: '100%',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center'
+                }}
+                ref={modalRef}
+              >
+                {error ? (
+                  <FallbackFlowchart code={sanitizedCode} />
+                ) : !svgContent ? (
+                  <div style={{ color: '#71717A' }}>Loading diagram...</div>
+                ) : null}
+              </div>
             </div>
           </div>
         </div>
@@ -162,16 +392,23 @@ const MermaidBlock = memo(function MermaidBlock({ code }) {
   );
 });
 
-// Normalizes LaTeX math, single dollar signs, and Markdown GFM tables
+
+// Normalizes LaTeX math, single dollar signs, naked equations, and Markdown GFM tables
 function normalizeMarkdown(rawText) {
   if (!rawText) return '';
 
   let text = rawText;
 
-  // 1. Fix single-line concatenated table rows (e.g. "| a | b | | --- | --- | | c | d |" -> "|\n|")
+  // 1. Split inline smashed headers, dividers, and bullet points (e.g. "output biases --- ### 3.3 ...")
+  text = text.replace(/([^\n])\s+---\s+([^\n])/g, '$1\n\n---\n\n$2');
+  text = text.replace(/([^\n])\s+(#{1,6}\s+[^\n]+)/g, '$1\n\n$2\n\n');
+  text = text.replace(/([^\n])\s+([*-]\s+\$)/g, '$1\n$2');
+  text = text.replace(/([^\n])\s+(\*\*(?:Where|Note|Definition|Parameters?):\*\*)/gi, '$1\n\n$2');
+
+  // 2. Fix single-line concatenated table rows (e.g. "| a | b | | --- | --- | | c | d |" -> "|\n|")
   text = text.replace(/\|\s*\|\s*(?=[^:\n|]*[:\w-])/g, '|\n|');
 
-  // 2. Fix broken LaTeX with newlines before closing dollars (e.g. "$x \in R^d\n$, the encoder" -> "$x \in R^d$, the encoder")
+  // 3. Fix broken LaTeX with newlines before closing dollars (e.g. "$x \in R^d\n$, the encoder" -> "$x \in R^d$, the encoder")
   text = text.replace(/\$([^$\n]+?)\n\s*(\$,|\$\.|\$\:|\$)/g, (match, expr, trailing) => {
     const punct = trailing.startsWith('$') ? trailing.slice(1) : trailing;
     return `$${expr.trim()}$${punct ? punct : ''}`;
@@ -180,10 +417,10 @@ function normalizeMarkdown(rawText) {
   // Fix "$formula\n$" -> "$$formula$$"
   text = text.replace(/\$([^\n$]+?)\n\s*\$/g, (m, g1) => `\n\n$$\n${g1.trim()}\n$$\n\n`);
 
-  // 3. Fix split dollar signs within empty lines ("$\n$" or "$\n\n$")
+  // 4. Fix split dollar signs within empty lines ("$\n$" or "$\n\n$")
   text = text.replace(/\$\s*\n+\s*\$/g, '');
 
-  // 4. Remove standalone empty math blocks ($$$$, $$ $$, or consecutive standalone $$ lines)
+  // 5. Remove standalone empty math blocks ($$$$, $$ $$, or consecutive standalone $$ lines)
   text = text.replace(/\$\$\s*\$\$/g, '');
   
   // Clean line-by-line empty math artifacts
@@ -192,12 +429,10 @@ function normalizeMarkdown(rawText) {
   for (let i = 0; i < rawLines.length; i++) {
     const line = rawLines[i].trim();
     const nextLine = (rawLines[i + 1] || '').trim();
-    // If this line is just '$$' and next line is just '$$', skip both
     if (line === '$$' && nextLine === '$$') {
-      i++; // skip next line as well
+      i++;
       continue;
     }
-    // If line is just empty math '$' or '$$' with nothing inside
     if (line === '$$$$' || line === '$$ $$' || line === '$$') {
       const prevLine = (rawLines[i - 1] || '').trim();
       if ((prevLine === '' || prevLine === '$$') && (nextLine === '' || nextLine === '$$')) {
@@ -208,13 +443,68 @@ function normalizeMarkdown(rawText) {
   }
   text = cleanedMathLines.join('\n');
 
-  // 5. Fix table rows broken by multi-line cells
+  // 6. Wrap standalone naked LaTeX display equation lines into $$...$$
+  // Prevents equations like \frac{\partial E}{\partial b} = \delta from rendering as raw text or crashing KaTeX
   const lines = text.split('\n');
+  const processedLines = [];
+  let inCodeBlock = false;
+  let inMathBlock = false;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const trimmed = line.trim();
+
+    if (trimmed.startsWith('```')) {
+      inCodeBlock = !inCodeBlock;
+      processedLines.push(line);
+      continue;
+    }
+    if (inCodeBlock) {
+      processedLines.push(line);
+      continue;
+    }
+
+    if (trimmed === '$$' || (trimmed.startsWith('$$') && trimmed.endsWith('$$') && trimmed.length > 2)) {
+      if (trimmed === '$$') inMathBlock = !inMathBlock;
+      processedLines.push(line);
+      continue;
+    }
+    if (inMathBlock) {
+      processedLines.push(line);
+      continue;
+    }
+
+    // Identify standalone naked LaTeX equations (formula lines with no $$ wrappers)
+    const hasInlineMath = /\$[^$]+\$/.test(trimmed);
+    const hasProseWords = /\b(the|is|are|where|with|we|let|for|and|in|because|have|substituting|therefore|which|then)\b/i.test(trimmed);
+    const startsWithLatex = /^\s*\\(frac|delta|Delta|sum|int|nabla|partial|sigma|Sigma|alpha|beta|gamma|theta|lambda|mu|mathbf|begin|left|sqrt)\b/.test(trimmed);
+    const isNakedEquation = !hasInlineMath && !hasProseWords && (
+      startsWithLatex || (
+        /\\(partial|frac|sum|delta|sigma|odot|times|cdot)/.test(trimmed) &&
+        /=/.test(trimmed)
+      )
+    );
+
+    if (isNakedEquation && !trimmed.startsWith('$') && !trimmed.startsWith('#') && !trimmed.startsWith('|') && !trimmed.startsWith('-')) {
+      processedLines.push('');
+      processedLines.push('$$');
+      processedLines.push(trimmed);
+      processedLines.push('$$');
+      processedLines.push('');
+    } else {
+      processedLines.push(line);
+    }
+  }
+
+  text = processedLines.join('\n');
+
+  // 7. Fix table rows broken by multi-line cells
+  const tblLines = text.split('\n');
   const normalizedLines = [];
   let inTable = false;
 
-  for (let i = 0; i < lines.length; i++) {
-    let line = lines[i];
+  for (let i = 0; i < tblLines.length; i++) {
+    let line = tblLines[i];
     const isTableSeparator = /^\|?\s*:?-+:?\s*\|/.test(line.trim());
     const isTableLine = line.trim().startsWith('|') && line.trim().endsWith('|');
 
@@ -236,12 +526,12 @@ function normalizeMarkdown(rawText) {
 
   text = normalizedLines.join('\n');
 
-  // 6. Ensure $$ block math has surrounding blank lines for clean KaTeX display
+  // 8. Ensure $$ block math has surrounding blank lines for clean KaTeX display
   text = text
     .replace(/([^\n])\$\$/g, '$1\n\n$$$$')
     .replace(/\$\$([^\n])/g, '$$$$\n\n$1');
 
-  // 7. Clean any remaining consecutive empty lines
+  // 9. Clean any remaining consecutive empty lines
   text = text.replace(/\n{3,}/g, '\n\n');
 
   return text;
@@ -692,6 +982,10 @@ export default function App() {
   // ChatGPT-style Effort Selector Popover State
   const [effortPopoverOpen, setEffortPopoverOpen] = useState(false);
   const effortPopoverRef = useRef(null);
+
+  // Sources Slide-over Drawer State (Point 5)
+  const [sourcesSidebarOpen, setSourcesSidebarOpen] = useState(false);
+  const [activeSourceIndex, setActiveSourceIndex] = useState(null);
 
   useEffect(() => {
     function handleClickOutside(event) {
@@ -1509,14 +1803,14 @@ export default function App() {
                         </div>
                       </div>
 
-                      {/* Assistant Turn: Main Answer + Outputs & Sources Sidebar (Matching Screenshot) */}
+                      {/* Assistant Turn: Main Answer */}
                       <div className="chatgpt-response-layout">
                         {/* Main Synthesized Answer */}
                         <div className="main-answer-card">
                           <div className="turn-header-row">
                             <div className="turn-avatar ai-avatar"><Sparkles size={16} /></div>
                             <div className="chatgpt-thinking-pill">
-                              <Zap size={13} style={{ color: '#06B6D4' }} />
+                              <Zap size={13} style={{ color: '#E4E4E7' }} />
                               <span>Synthesized {targetMarks}-Mark Solution {qaResult?.retrieval_latency_ms ? `· ${qaResult.retrieval_latency_ms}ms` : ''}</span>
                             </div>
                             {isTyping && <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>streaming...</span>}
@@ -1529,6 +1823,16 @@ export default function App() {
 
                           {/* Toolbar Actions */}
                           <div className="chatgpt-actions-toolbar">
+                            <button
+                              type="button"
+                              className="chatgpt-action-btn sources-action-trigger"
+                              onClick={() => setSourcesSidebarOpen(true)}
+                              title="Open Grounding Sources & Citations Sidebar"
+                              style={{ background: 'rgba(255, 255, 255, 0.08)', color: '#FAFAFA' }}
+                            >
+                              <BookOpen size={14} />
+                              <span>Sources ({qaResult?.citations?.length || 0})</span>
+                            </button>
                             <button className="chatgpt-action-btn" onClick={copyAnswer} title="Copy Answer">
                               {copied ? <Check size={14} style={{ color: 'var(--emerald)' }} /> : <Copy size={14} />}
                               <span>{copied ? 'Copied' : 'Copy'}</span>
@@ -1548,62 +1852,22 @@ export default function App() {
                             )}
                           </div>
                         </div>
-
-                        {/* Right Sidebar: Outputs & Sources (Exact Screenshot Design) */}
-                        <aside className="chatgpt-sidebar-panel">
-                          {/* Outputs Card */}
-                          <div className="chatgpt-side-section">
-                            <div className="side-section-header">
-                              <span>Outputs</span>
-                              <span style={{ fontSize: '0.70rem', color: 'var(--text-dim)' }}>2 items</span>
-                            </div>
-                            <div className="side-item-list">
-                              <div className="side-item-card" onClick={() => window.print()} title="Print / Export Solution PDF">
-                                <FileText size={15} className="side-icon-pdf" />
-                                <div className="side-item-info">
-                                  <span className="side-item-title">{`Solution_${targetMarks}M_${subject}.pdf`}</span>
-                                  <span className="side-item-sub">Ready to print</span>
-                                </div>
-                              </div>
-                              <div className="side-item-card" onClick={saveToBank} title="Save question & answer to question bank">
-                                <BookMarked size={15} className="side-icon-doc" />
-                                <div className="side-item-info">
-                                  <span className="side-item-title">Question_Bank_Entry</span>
-                                  <span className="side-item-sub">Revision Deck</span>
-                                </div>
-                              </div>
-                            </div>
-                          </div>
-
-                          {/* Sources Card */}
-                          <div className="chatgpt-side-section">
-                            <div className="side-section-header">
-                              <span>Sources ({qaResult?.citations?.length || 0})</span>
-                              <span className="side-section-badge">Grounding</span>
-                            </div>
-                            <div className="side-item-list">
-                              {qaResult?.citations && qaResult.citations.length > 0 ? (
-                                qaResult.citations.map((c, i) => (
-                                  <div key={i} className="side-item-card" title={`${c.source} · Module ${c.module_number || 1} · Page ${c.page_number || 1}`}>
-                                    <FileText size={15} className="side-icon-source" />
-                                    <div className="side-item-info">
-                                      <span className="side-item-title">{c.source}</span>
-                                      <span className="side-item-sub">
-                                        {c.module_number ? `Mod ${c.module_number}` : 'Notes'} {c.page_number ? `· p.${c.page_number}` : ''}
-                                      </span>
-                                    </div>
-                                  </div>
-                                ))
-                              ) : (
-                                <div className="side-item-card empty">
-                                  <span className="side-item-sub">University syllabus reference</span>
-                                </div>
-                              )}
-                            </div>
-                          </div>
-                        </aside>
                       </div>
                     </div>
+                  )}
+
+                  {/* Floating Right Toggle Bar for Sources (Point 5) */}
+                  {qaResult && (
+                    <button
+                      type="button"
+                      className="sources-floating-toggle-btn"
+                      onClick={() => setSourcesSidebarOpen(o => !o)}
+                      title="Toggle Reference Sources Sidebar"
+                    >
+                      <BookOpen size={14} />
+                      <span>Sources</span>
+                      <span className="sources-count-badge">{qaResult?.citations?.length || 0}</span>
+                    </button>
                   )}
 
                 </div>
@@ -1766,6 +2030,115 @@ export default function App() {
 
                 <div className="chatgpt-disclaimer">
                   Eduniti AI may produce approximations · Verify key derivations with official university notes
+                </div>
+              </div>
+
+              {/* Slide-In Right Drawer for Sources (Point 5) */}
+              <div
+                className={`sources-drawer-backdrop ${sourcesSidebarOpen ? 'open' : ''}`}
+                onClick={() => setSourcesSidebarOpen(false)}
+              >
+                <div className="sources-drawer-panel" onClick={e => e.stopPropagation()}>
+                  <div className="sources-drawer-header">
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <BookOpen size={16} style={{ color: '#FAFAFA' }} />
+                      <span style={{ fontWeight: 600, color: '#FAFAFA', fontSize: '0.92rem' }}>
+                        Reference Sources
+                      </span>
+                      <span className="sources-toggle-badge">
+                        {qaResult?.citations?.length || 0} Sources
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      className="btn btn-ghost btn-icon-square"
+                      onClick={() => setSourcesSidebarOpen(false)}
+                      title="Close Sources Sidebar"
+                    >
+                      <X size={15} />
+                    </button>
+                  </div>
+
+                  <div className="sources-drawer-body">
+                    {/* Grounding Status */}
+                    <div style={{
+                      display: 'flex', alignItems: 'center', gap: 10,
+                      padding: '10px 14px', borderRadius: 8,
+                      background: 'rgba(255, 255, 255, 0.04)',
+                      border: '1px solid rgba(255, 255, 255, 0.08)'
+                    }}>
+                      <CheckCircle2 size={15} style={{ color: '#34D399', flexShrink: 0 }} />
+                      <div style={{ fontSize: '0.76rem', color: '#D4D4D8', lineHeight: 1.4 }}>
+                        Grounding verified with indexed course materials from <strong>{subject}</strong>.
+                      </div>
+                    </div>
+
+                    {/* Citations List */}
+                    <div className="drawer-section">
+                      <div className="drawer-section-title">Cited Course Modules & Documents</div>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                        {qaResult?.citations && qaResult.citations.length > 0 ? (
+                          qaResult.citations.map((c, i) => (
+                            <div
+                              key={i}
+                              className={`drawer-source-card ${activeSourceIndex === i ? 'highlighted' : ''}`}
+                              onClick={() => setActiveSourceIndex(activeSourceIndex === i ? null : i)}
+                            >
+                              <div className="drawer-source-top">
+                                <FileText size={15} style={{ color: '#E4E4E7', flexShrink: 0 }} />
+                                <span className="drawer-source-name" title={c.source}>{c.source}</span>
+                              </div>
+                              <div className="drawer-source-meta">
+                                {c.module_number && (
+                                  <span className="badge-tag badge-cyan">Module {c.module_number}</span>
+                                )}
+                                {c.page_number && (
+                                  <span className="badge-tag">Page {c.page_number}</span>
+                                )}
+                                {c.relevance && (
+                                  <span className="badge-tag badge-emerald">{(c.relevance * 100).toFixed(0)}% Match</span>
+                                )}
+                              </div>
+                              {c.text && (
+                                <div className="drawer-source-snippet">
+                                  "{c.text.slice(0, 160)}..."
+                                </div>
+                              )}
+                            </div>
+                          ))
+                        ) : (
+                          <div className="drawer-empty-state">
+                            <span>Standard university syllabus reference and core textbooks.</span>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Generated Outputs / Artifacts */}
+                    <div className="drawer-section">
+                      <div className="drawer-section-title">Outputs & Study Artifacts</div>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                        <div className="drawer-item-card" onClick={() => window.print()} title="Print or save Solution as PDF">
+                          <Printer size={16} style={{ color: '#FAFAFA' }} />
+                          <div className="drawer-item-info">
+                            <span className="drawer-item-name">{`Solution_${targetMarks}M_${subject}.pdf`}</span>
+                            <span className="drawer-item-sub">Ready to print or export</span>
+                          </div>
+                        </div>
+                        <div className="drawer-item-card" onClick={saveToBank} title="Save to Question Bank">
+                          <BookMarked size={16} style={{ color: '#FAFAFA' }} />
+                          <div className="drawer-item-info">
+                            <span className="drawer-item-name">Question Bank Entry</span>
+                            <span className="drawer-item-sub">Add to revision deck</span>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="sources-drawer-footer">
+                    Eduniti RAG Grounding Engine · Powered by Qdrant Vector Search
+                  </div>
                 </div>
               </div>
             </div>

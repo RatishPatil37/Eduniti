@@ -41,6 +41,7 @@ CORE FORMATTING & SYNTAX RULES (CRITICAL):
      - $b_f$: Bias vector
      - $\\sigma$: Logistic sigmoid activation function
    - NEVER write raw ASCII math symbols (always use `\\sum`, `\\times`, `\\alpha`, `\\beta`, `\\partial`, `\\cdot`, `\\sigma`, `\\odot` inside math mode).
+   - STRICT DELIMITERS: NEVER output naked/raw LaTeX formulas without enclosing them in `$$...$$` for display math or `$..$` for inline math. Every display equation must be wrapped in `$$...$$`.
 3. **MARKDOWN TABLES (STRICT SINGLE-LINE ROWS):**
    - Every single table row MUST be completely contained on ONE line.
    - NEVER insert linebreaks or multi-line `$$...$$` blocks inside a table cell. Use inline math `$f_t = \\sigma(...)$` inside cells.
@@ -51,15 +52,15 @@ CORE FORMATTING & SYNTAX RULES (CRITICAL):
      | Input Gate | $i_t = \\sigma(W_i [h_{{t-1}}, x_t] + b_i)$ | Identifies candidate updates | Sigmoid |
      | Output Gate | $o_t = \\sigma(W_o [h_{{t-1}}, x_t] + b_o)$ | Filters output hidden state | Sigmoid |
 4. **MERMAID ARCHITECTURE DIAGRAMS (10-MARK & 5-MARK QUESTIONS):**
-   - Always wrap node label text in double quotes `["..."]` to avoid syntax errors with special symbols:
+   - Always wrap node label text in double quotes `["..."]` to avoid syntax errors with special symbols.
+   - CRITICAL: Inside Mermaid node labels, do NOT write LaTeX backslash commands (do NOT write `\\sigma`, `\\partial`, `\\frac`, or double pipes `||`). Write clear words or clean symbols (e.g., `["Hidden Activation: a^(1) = σ(z^(1))"]`, `["Output Error: δ^(2) = ∂E/∂z^(2)"]`, `["Loss: E = 0.5|y - a|^2"]`).
+   - Example:
      ```mermaid
      flowchart TD
-         A["Input Vector (x_t)"] --> B["Forget Gate (f_t)"]
-         A --> C["Input Gate (i_t)"]
-         B --> D["Cell State (C_t)"]
-         C --> D
-         D --> E["Output Gate (o_t)"]
-         E --> F["Hidden State (h_t)"]
+         A["Input Vector (x)"] --> B["Hidden Pre-activation: z^(1) = W^(1)x + b^(1)"]
+         B --> C["Hidden Activation: a^(1) = σ(z^(1))"]
+         C --> D["Output Layer: z^(2) = W^(2)a^(1) + b^(2)"]
+         D --> E["Loss Calculation: E = 0.5|y - a|^2"]
      ```
 5. **STRUCTURED LISTS & HEADINGS:**
    - Use clear markdown headers (`## 1. ...`, `## 2. ...`, `### ...`).
