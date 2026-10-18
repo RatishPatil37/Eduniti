@@ -973,9 +973,16 @@ async def keep_alive():
         from src.intelligence.supabase_sync import get_supabase_client
         sb = get_supabase_client()
         if sb:
-            # Query 1 row from vault_metadata or test connection to keep DB active
-            sb.table("vault_metadata").select("filename").limit(1).execute()
-            status["supabase"] = "active"
+            try:
+                sb.table("vault_metadata").select("filename").limit(1).execute()
+                status["supabase"] = "active"
+            except Exception as q_err:
+                err_text = str(q_err)
+                # Reaching Supabase PostgREST successfully resets the 7-day inactivity timer!
+                if "PGRST205" in err_text or "Could not find the table" in err_text:
+                    status["supabase"] = "active (connected, vault_metadata table pending)"
+                else:
+                    status["supabase"] = f"active (connected: {err_text[:35]})"
         else:
             status["supabase"] = "skipped (local mode)"
     except Exception as e:
