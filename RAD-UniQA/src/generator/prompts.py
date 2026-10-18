@@ -25,13 +25,23 @@ STRUCTURAL REQUIREMENTS FOR {target_marks} MARKS:
 {mark_instructions}
 
 CORE FORMATTING & SYNTAX RULES (CRITICAL):
-1. **Academic Tone & Structure:** Write directly in structured academic textbook prose. Do NOT include conversational greetings or filler (never say "Here is the answer" or "I hope this helps").
+1. **Academic Tone & Spacing:**
+   - Write directly in structured academic textbook prose. Do NOT include conversational greetings or filler.
+   - MANDATORY DOUBLE LINEBREAKS: Always place empty blank lines before and after every Markdown heading (`##`, `###`), horizontal divider (`---`), display equation (`$$...$$`), and `**Where:**` parameter list. NEVER smash headings, dividers, or text together on the same line.
 2. **MATHEMATICAL NOTATION & EQUATION INTEGRITY:**
-   - Write all governing equations in FULL with valid LaTeX syntax in dedicated `$$...$$` display blocks:
+   - Write all governing equations in FULL with valid standard KaTeX syntax in dedicated `$$...$$` display blocks with blank lines around them:
+
      $$f_t = \\sigma(W_f x_t + U_f h_{{t-1}} + b_f)$$
+
+   - NEVER output naked/raw LaTeX formulas without enclosing them in `$$...$$` for display math or `$..$` for inline math.
+   - NEVER wrap non-mathematical English sentences inside `$$` or `$`. Math delimiters are strictly for formulas.
+   - VALID LATEX MACROS ONLY:
+     * Floor function: Always use `\\lfloor ... \\rfloor` (NEVER use `\\floor`).
+     * Ceiling function: Always use `\\lceil ... \\rceil` (NEVER use `\\ceil`).
+     * Multiplication: Always use `\\times` or `\\cdot` (NEVER type `\\tines`).
+     * Implication: Always use `\\implies` or `\\to` (NEVER type `\\inplies`).
    - NEVER output empty `$$` lines, unpopulated `$$$$` blocks, or placeholder equation lines.
-   - For inline variables and dimensions within prose, write them on the SAME line without line breaks:
-     Let the input vector be $x \\in \\mathbb{{R}}^d$ and weight matrix $W_1 \\in \\mathbb{{R}}^{{p \\times d}}$.
+   - For inline variables within prose, write them on the SAME line without line breaks: `$x \\in \\mathbb{{R}}^d$`.
    - IMMEDIATELY following every mathematical formula, provide a clear parameter breakdown formatted as:
      **Where:**
      - $f_t$: Forget gate activation vector
@@ -41,7 +51,6 @@ CORE FORMATTING & SYNTAX RULES (CRITICAL):
      - $b_f$: Bias vector
      - $\\sigma$: Logistic sigmoid activation function
    - NEVER write raw ASCII math symbols (always use `\\sum`, `\\times`, `\\alpha`, `\\beta`, `\\partial`, `\\cdot`, `\\sigma`, `\\odot` inside math mode).
-   - STRICT DELIMITERS: NEVER output naked/raw LaTeX formulas without enclosing them in `$$...$$` for display math or `$..$` for inline math. Every display equation must be wrapped in `$$...$$`.
 3. **MARKDOWN TABLES (STRICT SINGLE-LINE ROWS):**
    - Every single table row MUST be completely contained on ONE line.
    - NEVER insert linebreaks or multi-line `$$...$$` blocks inside a table cell. Use inline math `$f_t = \\sigma(...)$` inside cells.

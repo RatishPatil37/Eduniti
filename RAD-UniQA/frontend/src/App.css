@@ -567,7 +567,7 @@
 .chatgpt-stream-scroll {
   flex: 1;
   overflow-y: auto;
-  padding-bottom: 150px;
+  padding-bottom: 220px;
 }
 
 .chatgpt-stream-content {
@@ -1054,10 +1054,13 @@
   flex-direction: column;
   align-items: center;
   padding: 8px 20px 14px 20px;
-  background: #09090B !important;
-  border-top: 1px solid #1F1F23 !important;
+  background: transparent !important;
+  border: none !important;
+  border-top: none !important;
+  box-shadow: none !important;
   backdrop-filter: none !important;
   -webkit-backdrop-filter: none !important;
+  pointer-events: none;
   z-index: 40;
 }
 
@@ -1068,11 +1071,12 @@
   border: 1px solid #222226 !important;
   border-radius: 18px;
   padding: 14px 18px 12px 18px;
-  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.65);
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.7);
   position: relative;
   transition: border-color 0.18s ease, box-shadow 0.18s ease;
   backdrop-filter: none !important;
   -webkit-backdrop-filter: none !important;
+  pointer-events: auto;
 }
 
 /* Minimalist GPT-style active state — STRICTLY NO NEON BLUE GLOW */
@@ -1230,6 +1234,7 @@
   color: var(--text-dim);
   text-align: center;
   margin-top: 6px;
+  pointer-events: auto;
 }
 
 /* ============================================================
@@ -1246,6 +1251,7 @@
   width: 310px;
   box-shadow: 0 16px 40px rgba(0, 0, 0, 0.75);
   z-index: 100;
+  pointer-events: auto;
   animation: popover-rise 0.2s cubic-bezier(0.16, 1, 0.3, 1);
 }
 

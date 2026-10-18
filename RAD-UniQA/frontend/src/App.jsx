@@ -26,6 +26,7 @@ mermaid.initialize({
   startOnLoad: false,
   theme: 'dark',
   securityLevel: 'loose',
+  suppressErrorRendering: true,
   fontFamily: 'Inter, system-ui, -apple-system, sans-serif',
   themeVariables: {
     darkMode: true,
@@ -54,33 +55,8 @@ function sanitizeMermaid(rawCode) {
   // Strip code fences if present inside
   sanitized = sanitized.replace(/^```(?:mermaid)?/i, '').replace(/```$/, '').trim();
 
-  // Fix lines with odd number of quotes (unclosed string literal across newlines)
-  const rawLines = sanitized.split('\n');
-  const mergedLines = [];
-  let buffer = '';
-
-  for (let i = 0; i < rawLines.length; i++) {
-    const current = rawLines[i].trim();
-    if (!current) continue;
-
-    if (buffer) {
-      buffer += ' ' + current;
-      const quoteCount = (buffer.match(/"/g) || []).length;
-      if (quoteCount % 2 === 0) {
-        mergedLines.push(buffer);
-        buffer = '';
-      }
-    } else {
-      const quoteCount = (current.match(/"/g) || []).length;
-      if (quoteCount % 2 !== 0) {
-        buffer = current;
-      } else {
-        mergedLines.push(current);
-      }
-    }
-  }
-  if (buffer) mergedLines.push(buffer);
-  sanitized = mergedLines.join('\n');
+  // Strip math dollar signs
+  sanitized = sanitized.replace(/\$/g, '');
 
   // Replace common LaTeX math macros with clean Unicode representations
   const latexToUnicode = [
@@ -100,10 +76,13 @@ function sanitizeMermaid(rawCode) {
     [/\\cdot/g, '·'],
     [/\\in/g, '∈'],
     [/\\sum/g, 'Σ'],
+    [/\\to/g, '→'],
+    [/\\implies/g, '⇒'],
     [/\\mathbb\{R\}/g, 'R'],
     [/\\mathbb\{[A-Z]\}/g, 'R'],
     [/\\text\{([^}]+)\}/g, '$1'],
     [/\\mathbf\{([^}]+)\}/g, '$1'],
+    [/\\mathcal\{([^}]+)\}/g, '$1'],
     [/\\hat\{([^}]+)\}/g, '$1^'],
     [/\\vec\{([^}]+)\}/g, '$1'],
     [/\\frac\{([^}]+)\}\{([^}]+)\}/g, '$1/$2'],
@@ -117,8 +96,8 @@ function sanitizeMermaid(rawCode) {
     sanitized = sanitized.replace(regex, rep);
   }
 
-  // Replace double pipes || or single pipes | inside labels with space
-  sanitized = sanitized.replace(/\|+/g, ' ');
+  // Replace double pipes || with space, but PRESERVE single pipes on edge transitions -->|label|
+  sanitized = sanitized.replace(/\|\|+/g, ' ');
 
   // Strip single quotes inside equations like σ'(z) -> σ′(z)
   sanitized = sanitized.replace(/'/g, '′');
@@ -134,7 +113,7 @@ function sanitizeMermaid(rawCode) {
     let l = line.trim();
     if (!l) return '';
 
-    // Match ["..."] definitions:
+    // Match ["..."] definitions and sanitize inner brackets
     l = l.replace(/\["([^"\n]*)"\]/g, (match, inner) => {
       const clean = inner.replace(/\[/g, '(').replace(/\]/g, ')').trim();
       return `["${clean}"]`;
@@ -142,7 +121,8 @@ function sanitizeMermaid(rawCode) {
 
     // Match unquoted [label] definitions if any:
     l = l.replace(/([a-zA-Z0-9_-]+)\s*\[([^"\]\n]+)\]/g, (match, id, inner) => {
-      return `${id}["${inner.trim()}"]`;
+      const clean = inner.replace(/["\[\]]/g, '').replace(/[(]/g, '(').replace(/[)]/g, ')').trim();
+      return `${id}["${clean}"]`;
     });
 
     return l;
@@ -152,6 +132,16 @@ function sanitizeMermaid(rawCode) {
   if (!/^(flowchart|graph|sequenceDiagram|classDiagram|stateDiagram|erDiagram|gantt)/i.test(result)) {
     result = `flowchart TD\n${result}`;
   }
+
+  // Ensure any subgraphs have matching "end"
+  const subgraphCount = (result.match(/\bsubgraph\b/g) || []).length;
+  const endCount = (result.match(/\bend\b/g) || []).length;
+  if (subgraphCount > endCount) {
+    for (let k = 0; k < subgraphCount - endCount; k++) {
+      result += '\nend';
+    }
+  }
+
   return result;
 }
 
@@ -224,46 +214,63 @@ const MermaidBlock = memo(function MermaidBlock({ code }) {
   const sanitizedCode = useMemo(() => sanitizeMermaid(code), [code]);
 
   useEffect(() => {
-    let isMounted = true;
-    const id = `mg-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
+    let isCancelled = false;
+    const id = `mg-${Date.now()}-${Math.floor(Math.random() * 100000)}`;
 
-    const renderDiagram = async () => {
+    const renderWithTimeout = (targetId, srcCode, timeoutMs = 2500) => {
+      return Promise.race([
+        mermaid.render(targetId, srcCode),
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error('Mermaid render timeout')), timeoutMs)
+        )
+      ]);
+    };
+
+    const cleanupOrphans = () => {
+      document.querySelectorAll(`[id^="d${id}"], [id^="${id}"], .mermaid-error`).forEach(el => el.remove());
+    };
+
+    // Debounce rendering by 150ms to prevent browser lockup during streaming token arrival
+    const timer = setTimeout(async () => {
+      if (isCancelled) return;
       try {
-        const { svg } = await mermaid.render(id, sanitizedCode);
-        if (isMounted) {
+        const { svg } = await renderWithTimeout(id, sanitizedCode, 2500);
+        if (!isCancelled) {
           setSvgContent(svg);
           setError(false);
+          cleanupOrphans();
         }
       } catch (err) {
-        console.warn('Initial Mermaid render error, attempting aggressive fallback...', err);
-        const errEl = document.getElementById(id) || document.getElementById('d' + id);
-        if (errEl) errEl.remove();
+        cleanupOrphans();
+        if (isCancelled) return;
 
         try {
-          // Secondary fallback: strip all non-alphanumeric punctuation inside node brackets
+          // Secondary aggressive fallback: strip all non-alphanumeric punctuation inside node brackets
           const fallbackCode = sanitizedCode.replace(/\["([^"]*)"\]/g, (_, inner) => {
             const stripped = inner.replace(/[^a-zA-Z0-9 _:\-+=()]/g, ' ');
             return `["${stripped.trim()}"]`;
           });
           const fbId = `mg-fb-${Date.now()}`;
-          const { svg } = await mermaid.render(fbId, fallbackCode);
-          if (isMounted) {
+          const { svg } = await renderWithTimeout(fbId, fallbackCode, 1500);
+          if (!isCancelled) {
             setSvgContent(svg);
             setError(false);
+            document.querySelectorAll(`[id^="d${fbId}"], [id^="${fbId}"]`).forEach(el => el.remove());
           }
         } catch (fbErr) {
-          console.error('Mermaid fallback render failed, using interactive pipeline fallback:', fbErr);
-          const errEl2 = document.getElementById('d' + id);
-          if (errEl2) errEl2.remove();
-          if (isMounted) {
+          cleanupOrphans();
+          if (!isCancelled) {
             setError(true);
           }
         }
       }
-    };
+    }, 150);
 
-    renderDiagram();
-    return () => { isMounted = false; };
+    return () => {
+      isCancelled = true;
+      clearTimeout(timer);
+      cleanupOrphans();
+    };
   }, [sanitizedCode]);
 
   useEffect(() => {
@@ -420,36 +427,62 @@ const MermaidBlock = memo(function MermaidBlock({ code }) {
 
 
 // Normalizes LaTeX math, single dollar signs, naked equations, and Markdown GFM tables
+// Normalizes LaTeX math, single dollar signs, naked equations, and Markdown GFM tables
 function normalizeMarkdown(rawText) {
   if (!rawText) return '';
 
   let text = rawText;
 
-  // 1. Split inline smashed headers, dividers, and bullet points (e.g. "output biases --- ### 3.3 ...")
-  text = text.replace(/([^\n])\s+---\s+([^\n])/g, '$1\n\n---\n\n$2');
-  text = text.replace(/([^\n])\s+(#{1,6}\s+[^\n]+)/g, '$1\n\n$2\n\n');
-  text = text.replace(/([^\n])\s+([*-]\s+\$)/g, '$1\n$2');
-  text = text.replace(/([^\n])\s+(\*\*(?:Where|Note|Definition|Parameters?):\*\*)/gi, '$1\n\n$2');
+  // 1. Auto-correct common LLM LaTeX typos and KaTeX incompatibilities
+  text = text.replace(/\\left\\floor\b/g, '\\left\\lfloor');
+  text = text.replace(/\\right\\floor\b/g, '\\right\\rfloor');
+  text = text.replace(/\\floor\b/g, '\\lfloor');
+  text = text.replace(/\\left\\ceil\b/g, '\\left\\lceil');
+  text = text.replace(/\\right\\ceil\b/g, '\\right\\rceil');
+  text = text.replace(/\\ceil\b/g, '\\lceil');
+  text = text.replace(/\\tines\b/g, '\\times');
+  text = text.replace(/\\inplies\b/g, '\\implies');
+  text = text.replace(/\\defeq\b/g, '\\stackrel{\\text{def}}{=}');
+  text = text.replace(/\\Subsanpling\b/g, 'Subsampling');
+  text = text.replace(/\\Subsampling\b/g, 'Subsampling');
+  text = text.replace(/\\argmax\b/g, '\\operatorname{argmax}');
+  text = text.replace(/\\argmin\b/g, '\\operatorname{argmin}');
 
-  // 2. Fix single-line concatenated table rows (e.g. "| a | b | | --- | --- | | c | d |" -> "|\n|")
+  // 2. Separate horizontal rules (---) cleanly with double newlines
+  text = text.replace(/([^\n])\s*---\s*([^\n])/g, '$1\n\n---\n\n$2');
+  text = text.replace(/([^\n])\s+---\s*$/gm, '$1\n\n---\n\n');
+
+  // 3. Separate Markdown headers (##, ###, etc.) from preceding text and each other
+  text = text.replace(/([^\n])\s+(#{1,6}\s+[^\n]+)/g, '$1\n\n$2');
+  text = text.replace(/(#{1,6}\s+[^#\n]+?)\s+(#{1,6}\s+)/g, '$1\n\n$2');
+
+  // 4. Split and format "**Where:**" parameter breakdown lists cleanly
+  text = text.replace(/(\*\*(?:Where|Note|Definition|Parameters?):\*\*)\s*(?:-\s*)?/gi, '\n\n$1\n\n- ');
+  text = text.replace(/([^\n])\s+-\s+(\$[^$]+\$:)/g, '$1\n- $2');
+
+  // 5. Fix single-line concatenated table rows (e.g. "| a | b | | --- | --- | | c | d |" -> "|\n|")
   text = text.replace(/\|\s*\|\s*(?=[^:\n|]*[:\w-])/g, '|\n|');
 
-  // 3. Fix broken LaTeX with newlines before closing dollars (e.g. "$x \in R^d\n$, the encoder" -> "$x \in R^d$, the encoder")
+  // 6. Fix broken inline LaTeX with newlines before closing dollars ($x \in R^d\n$)
   text = text.replace(/\$([^$\n]+?)\n\s*(\$,|\$\.|\$\:|\$)/g, (match, expr, trailing) => {
     const punct = trailing.startsWith('$') ? trailing.slice(1) : trailing;
     return `$${expr.trim()}$${punct ? punct : ''}`;
   });
 
-  // Fix "$formula\n$" -> "$$formula$$"
-  text = text.replace(/\$([^\n$]+?)\n\s*\$/g, (m, g1) => `\n\n$$\n${g1.trim()}\n$$\n\n`);
+  // 7. Remove accidental $$ math wrapping around plain English prose sentences
+  // (Fixes "The forward operation with an identity shortcut is defined as :" from rendering as smashed italic math)
+  text = text.replace(/\$\$\s*([\s\S]*?)\s*\$\$/g, (match, inner) => {
+    const trimmed = inner.trim();
+    if (!/[\\=^_{}+\-*/<>]/.test(trimmed) && trimmed.split(/\s+/).length >= 3) {
+      return `\n\n${trimmed}\n\n`;
+    }
+    return match;
+  });
 
-  // 4. Fix split dollar signs within empty lines ("$\n$" or "$\n\n$")
+  // 8. Remove standalone empty math blocks ($$$$, $$ $$, or empty lines between $$)
+  text = text.replace(/\$\$\s*\$\$/g, '');
   text = text.replace(/\$\s*\n+\s*\$/g, '');
 
-  // 5. Remove standalone empty math blocks ($$$$, $$ $$, or consecutive standalone $$ lines)
-  text = text.replace(/\$\$\s*\$\$/g, '');
-  
-  // Clean line-by-line empty math artifacts
   const rawLines = text.split('\n');
   const cleanedMathLines = [];
   for (let i = 0; i < rawLines.length; i++) {
@@ -469,8 +502,9 @@ function normalizeMarkdown(rawText) {
   }
   text = cleanedMathLines.join('\n');
 
-  // 6. Wrap standalone naked LaTeX display equation lines into $$...$$
-  // Prevents equations like \frac{\partial E}{\partial b} = \delta from rendering as raw text or crashing KaTeX
+  // 9. Universal Naked Equation Detector:
+  // Automatically wraps standalone mathematical equation lines in $$...$$
+  // Covers: \mathcal{F}(x) = ..., y = \mathcal{F}(...), \frac{\partial E}{\partial x} = ..., O = \left\lfloor...
   const lines = text.split('\n');
   const processedLines = [];
   let inCodeBlock = false;
@@ -490,8 +524,12 @@ function normalizeMarkdown(rawText) {
       continue;
     }
 
-    if (trimmed === '$$' || (trimmed.startsWith('$$') && trimmed.endsWith('$$') && trimmed.length > 2)) {
-      if (trimmed === '$$') inMathBlock = !inMathBlock;
+    if (trimmed === '$$') {
+      inMathBlock = !inMathBlock;
+      processedLines.push(line);
+      continue;
+    }
+    if (trimmed.startsWith('$$') && trimmed.endsWith('$$') && trimmed.length > 2) {
       processedLines.push(line);
       continue;
     }
@@ -500,18 +538,27 @@ function normalizeMarkdown(rawText) {
       continue;
     }
 
-    // Identify standalone naked LaTeX equations (formula lines with no $$ wrappers)
-    const hasInlineMath = /\$[^$]+\$/.test(trimmed);
-    const hasProseWords = /\b(the|is|are|where|with|we|let|for|and|in|because|have|substituting|therefore|which|then)\b/i.test(trimmed);
-    const startsWithLatex = /^\s*\\(frac|delta|Delta|sum|int|nabla|partial|sigma|Sigma|alpha|beta|gamma|theta|lambda|mu|mathbf|begin|left|sqrt)\b/.test(trimmed);
-    const isNakedEquation = !hasInlineMath && !hasProseWords && (
-      startsWithLatex || (
-        /\\(partial|frac|sum|delta|sigma|odot|times|cdot)/.test(trimmed) &&
-        /=/.test(trimmed)
-      )
+    // Skip Markdown syntax lines
+    if (trimmed.startsWith('|') || trimmed.startsWith('#') || trimmed === '---' || trimmed.startsWith('>')) {
+      processedLines.push(line);
+      continue;
+    }
+
+    // Comprehensive mathematical notation patterns:
+    const hasLatexCommands = /\\(mathcal|mathbf|mathbb|frac|partial|sum|int|nabla|sigma|Sigma|alpha|beta|gamma|theta|lambda|mu|delta|Delta|omega|Omega|left|right|sqrt|hat|vec|cdot|times|odot|prod|approx|sim|le|ge|in|to|implies|tanh|sin|cos|exp|log|ln|infty|lfloor|rfloor|lceil|rceil|perp|top)\b/.test(trimmed);
+    const hasMathRelations = /[=≈≤≥∈→⇒≡∝~]/.test(trimmed) || /\\(approx|le|ge|in|to|implies|sim|equiv)/.test(trimmed);
+    const hasSubSuper = /[_^]\{?[a-zA-Z0-9+\-*=()]+\}?/.test(trimmed);
+
+    // Count regular prose words
+    const proseWordCount = (trimmed.match(/\b(the|is|are|where|with|we|let|for|and|in|because|have|substituting|therefore|which|then|defined|as|by|from|using|yields|such|that)\b/gi) || []).length;
+
+    // Detect if line is a naked mathematical formula
+    const isNakedMath = !trimmed.startsWith('$') && proseWordCount <= 1 && (
+      (hasLatexCommands && (hasMathRelations || trimmed.startsWith('\\') || trimmed.startsWith('O =') || trimmed.startsWith('y =') || trimmed.startsWith('z =') || trimmed.startsWith('f('))) ||
+      (hasMathRelations && hasSubSuper && /^[a-zA-Z0-9()\[\]\\_^{}\s=+*/\-]+$/.test(trimmed))
     );
 
-    if (isNakedEquation && !trimmed.startsWith('$') && !trimmed.startsWith('#') && !trimmed.startsWith('|') && !trimmed.startsWith('-')) {
+    if (isNakedMath && !trimmed.startsWith('-') && !trimmed.startsWith('*')) {
       processedLines.push('');
       processedLines.push('$$');
       processedLines.push(trimmed);
@@ -524,7 +571,7 @@ function normalizeMarkdown(rawText) {
 
   text = processedLines.join('\n');
 
-  // 7. Fix table rows broken by multi-line cells
+  // 10. Fix table rows broken by multi-line cells
   const tblLines = text.split('\n');
   const normalizedLines = [];
   let inTable = false;
@@ -552,12 +599,12 @@ function normalizeMarkdown(rawText) {
 
   text = normalizedLines.join('\n');
 
-  // 8. Ensure $$ block math has surrounding blank lines for clean KaTeX display
+  // 11. Ensure $$ block math has surrounding blank lines for clean KaTeX display
   text = text
     .replace(/([^\n])\$\$/g, '$1\n\n$$$$')
     .replace(/\$\$([^\n])/g, '$$$$\n\n$1');
 
-  // 9. Clean any remaining consecutive empty lines
+  // 12. Clean any remaining consecutive empty lines
   text = text.replace(/\n{3,}/g, '\n\n');
 
   return text;
@@ -573,11 +620,22 @@ const RenderMarkdown = memo(function RenderMarkdown({ text }) {
 
   // 2. Pre-process: extract mermaid blocks before react-markdown
   const mermaidBlocks = [];
-  const processedText = cleanedText.replace(/```mermaid([\s\S]*?)```/g, (_, code) => {
+  let processedText = cleanedText.replace(/```mermaid([\s\S]*?)```/g, (_, code) => {
     const idx = mermaidBlocks.length;
     mermaidBlocks.push(code.trim());
     return `:::mermaid-${idx}:::`;
   });
+
+  // 3. Streaming Incomplete Math Safety:
+  // If text ends with an open math block ($$ or $), temporarily close it for KaTeX
+  const displayMathCount = (processedText.match(/\$\$/g) || []).length;
+  if (displayMathCount % 2 !== 0) {
+    processedText += '\n$$';
+  }
+  const inlineMathCount = (processedText.replace(/\$\$[\s\S]*?\$\$/g, '').match(/\$/g) || []).length;
+  if (inlineMathCount % 2 !== 0) {
+    processedText += '$';
+  }
 
   // 3. Custom high-end components for react-markdown
   const components = {
