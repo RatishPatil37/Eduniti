@@ -21,13 +21,15 @@ def get_supabase_client():
     if _supabase_client is not None:
         return _supabase_client
 
-    supabase_url = settings.SUPABASE_URL.strip() if settings.SUPABASE_URL else ""
+    supabase_url = (settings.SUPABASE_URL or os.getenv("SUPABASE_URL", "")).strip()
     supabase_key = (
-        settings.SUPABASE_SERVICE_KEY.strip()
-        or settings.SUPABASE_ANON_KEY.strip()
-        if hasattr(settings, "SUPABASE_ANON_KEY")
-        else ""
-    )
+        getattr(settings, "SUPABASE_KEY", "")
+        or getattr(settings, "SUPABASE_SERVICE_KEY", "")
+        or getattr(settings, "SUPABASE_ANON_KEY", "")
+        or os.getenv("SUPABASE_KEY", "")
+        or os.getenv("SUPABASE_SERVICE_KEY", "")
+        or os.getenv("SUPABASE_ANON_KEY", "")
+    ).strip()
 
     if not supabase_url or not supabase_key:
         logger.info("ℹ️ [SUPABASE] Cloud URL or Key not set. Using Local JSON persistence mode.")
