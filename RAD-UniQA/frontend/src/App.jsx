@@ -506,10 +506,23 @@ function normalizeMarkdown(rawText) {
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
-  // 3. Separate Markdown headers from preceding text
+  // 3. Separate Markdown headers from preceding/following text
   // ═══════════════════════════════════════════════════════════════════════════
   text = text.replace(/([^\n])\s+(#{1,6}\s+[^\n]+)/g, '$1\n\n$2');
   text = text.replace(/(#{1,6}\s+[^#\n]+?)\s+(#{1,6}\s+)/g, '$1\n\n$2');
+  // Separate table or equations starting immediately on the same line after a Markdown header:
+  // "## 5. Header | Col 1 | Col 2 |" -> "## 5. Header\n\n| Col 1 | Col 2 |"
+  text = text.replace(/(#{1,6}\s+[^|\n]+?)\s*(\|.+)/g, '$1\n\n$2');
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // 3.5. Fix single-line concatenated table rows (e.g. "| cell | | cell |" -> "|\n|")
+  // Restores tables loaded from history or streaming where rows were merged onto one line.
+  // ═══════════════════════════════════════════════════════════════════════════
+  text = text.replace(/\|\s*\|\s*(?=[^:\n|]*[:\w*-])/g, '|\n|');
+
+  // Separate equations smashed immediately against \end{...}:
+  // "\end{bmatrix}\mathcal{F}(x)" -> "\end{bmatrix}\n\n\mathcal{F}(x)"
+  text = text.replace(/(\\end\{(?:[bBpvV]?matrix|aligned|cases)\})\s*(?=[a-zA-Z\\$])/g, '$1\n\n');
 
   // ═══════════════════════════════════════════════════════════════════════════
   // 4. Format **Where:** / **Note:** parameter lists onto clean bullet lines
