@@ -27,8 +27,11 @@ import sys
 import time
 import json
 import uuid
+import logging
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timezone
+
+logger = logging.getLogger("api.main")
 
 if hasattr(sys.stdout, "reconfigure"):
     try:
@@ -914,7 +917,8 @@ async def root():
         "service": "RAD-UniQA / Eduniti Backend API",
         "version": "2.0.0",
         "docs_url": "/docs",
-        "health_check": "/health"
+        "health_check": "/health",
+        "keep_alive": "/api/v1/keep-alive"
     }
 
 
@@ -942,3 +946,53 @@ async def health():
         "question_bank": len(app.state.question_bank),
         "session_history": len(app.state.answer_history)
     }
+
+
+@app.get("/api/v1/keep-alive")
+@app.head("/api/v1/keep-alive")
+async def keep_alive():
+    """
+    Automated Keep-Alive endpoint designed for cron-job.org / uptime pings.
+    Performs lightweight health queries to simultaneously:
+      1. Keep the Render web service instance warm and awake
+      2. Ping Supabase PostgreSQL (resets Supabase 7-day auto-pause timer)
+      3. Ping Qdrant Vector Cloud (resets Qdrant cluster inactivity suspension)
+    """
+    timestamp = datetime.now(timezone.utc).isoformat()
+    status = {
+        "status": "alive",
+        "service": "RAD-UniQA / Eduniti",
+        "timestamp": timestamp,
+        "render": "active",
+        "supabase": "unconfigured",
+        "qdrant": "unconfigured"
+    }
+
+    # 1. Supabase Ping
+    try:
+        from src.intelligence.supabase_sync import get_supabase_client
+        sb = get_supabase_client()
+        if sb:
+            # Query 1 row from vault_metadata or test connection to keep DB active
+            sb.table("vault_metadata").select("filename").limit(1).execute()
+            status["supabase"] = "active"
+        else:
+            status["supabase"] = "skipped (local mode)"
+    except Exception as e:
+        logger.warning(f"Keep-alive Supabase check: {e}")
+        status["supabase"] = f"error: {str(e)}"
+
+    # 2. Qdrant Ping
+    try:
+        client = getattr(app.state, "qdrant_client", None)
+        if client:
+            cols = await client.get_collections()
+            col_count = len(cols.collections) if hasattr(cols, "collections") else 0
+            status["qdrant"] = f"active ({col_count} collections)"
+        else:
+            status["qdrant"] = "skipped (no client)"
+    except Exception as e:
+        logger.warning(f"Keep-alive Qdrant check: {e}")
+        status["qdrant"] = f"error: {str(e)}"
+
+    return status
