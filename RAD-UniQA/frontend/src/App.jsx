@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback, memo, useMemo } from 'react';
+import { createPortal } from 'react-dom';
 import {
   BookOpen, Sparkles, FileText, TrendingUp, GitFork, Calendar,
   Send, CheckCircle2, Clock, ChevronRight, BarChart3, Award,
@@ -277,6 +278,27 @@ const MermaidBlock = memo(function MermaidBlock({ code }) {
     }
   }, [svgContent, isModalOpen, zoomLevel]);
 
+  // Lock body scroll when Mermaid zoom modal is open
+  useEffect(() => {
+    if (isModalOpen) {
+      const prevOverflow = document.body.style.overflow;
+      document.body.style.overflow = 'hidden';
+      return () => {
+        document.body.style.overflow = prevOverflow;
+      };
+    }
+  }, [isModalOpen]);
+
+  // Handle ESC key to dismiss modal
+  useEffect(() => {
+    if (!isModalOpen) return;
+    const handleKeyDown = (e) => {
+      if (e.key === 'Escape') setIsModalOpen(false);
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isModalOpen]);
+
   const handleCopy = () => {
     navigator.clipboard.writeText(code);
     setCopied(true);
@@ -316,8 +338,8 @@ const MermaidBlock = memo(function MermaidBlock({ code }) {
         </div>
       </div>
 
-      {/* Claude-Style Artifact Modal Viewer with Zoom In / Out */}
-      {isModalOpen && (
+      {/* Claude-Style Artifact Modal Viewer Portalled to document.body */}
+      {isModalOpen && createPortal(
         <div className="mermaid-modal-backdrop" onClick={() => setIsModalOpen(false)}>
           <div className="mermaid-modal-content" onClick={e => e.stopPropagation()}>
             <div className="mermaid-modal-header">
@@ -331,7 +353,7 @@ const MermaidBlock = memo(function MermaidBlock({ code }) {
                   type="button"
                   className="mermaid-zoom-btn"
                   title="Zoom Out"
-                  onClick={() => setZoomLevel(z => Math.max(0.6, z - 0.2))}
+                  onClick={() => setZoomLevel(z => Math.max(0.5, z - 0.2))}
                 >
                   -
                 </button>
@@ -367,14 +389,17 @@ const MermaidBlock = memo(function MermaidBlock({ code }) {
             </div>
             <div className="mermaid-modal-body">
               <div
+                className="mermaid-modal-zoom-container"
                 style={{
                   transform: `scale(${zoomLevel})`,
-                  transformOrigin: 'center center',
+                  transformOrigin: 'top center',
                   transition: 'transform 0.18s ease',
                   width: '100%',
                   display: 'flex',
+                  flexDirection: 'column',
                   alignItems: 'center',
-                  justifyContent: 'center'
+                  justifyContent: 'flex-start',
+                  minHeight: 'fit-content'
                 }}
                 ref={modalRef}
               >
@@ -386,7 +411,8 @@ const MermaidBlock = memo(function MermaidBlock({ code }) {
               </div>
             </div>
           </div>
-        </div>
+        </div>,
+        document.body
       )}
     </>
   );
@@ -986,6 +1012,103 @@ export default function App() {
   // Sources Slide-over Drawer State (Point 5)
   const [sourcesSidebarOpen, setSourcesSidebarOpen] = useState(false);
   const [activeSourceIndex, setActiveSourceIndex] = useState(null);
+  const [drawerCitations, setDrawerCitations] = useState([]);
+
+  // Conversation Thread State (Preserves older chats in a single conversation thread)
+  const [conversationTurns, setConversationTurns] = useState(() => {
+    try {
+      const activeCached = localStorage.getItem('rad_active_conversation_turns');
+      if (activeCached) {
+        const parsed = JSON.parse(activeCached);
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      }
+      const userCached = localStorage.getItem(`rad_conversation_${user?.id || 'guest'}`);
+      return userCached ? JSON.parse(userCached) : [];
+    } catch {
+      return [];
+    }
+  });
+  const [printTurnId, setPrintTurnId] = useState(null);
+  const streamEndRef = useRef(null);
+
+  // Sync conversation turns to localStorage (never overwrite with empty on mount)
+  useEffect(() => {
+    try {
+      if (conversationTurns && conversationTurns.length > 0) {
+        localStorage.setItem('rad_active_conversation_turns', JSON.stringify(conversationTurns.slice(-30)));
+        if (user?.id) {
+          localStorage.setItem(`rad_conversation_${user.id}`, JSON.stringify(conversationTurns.slice(-30)));
+        }
+      }
+    } catch {}
+  }, [conversationTurns, user?.id]);
+
+  // Load user conversation cache if user signs in and active turns were empty
+  const userLoadedRef = useRef(false);
+  useEffect(() => {
+    if (user?.id && !userLoadedRef.current) {
+      userLoadedRef.current = true;
+      try {
+        if (conversationTurns.length === 0) {
+          const userCached = localStorage.getItem(`rad_conversation_${user.id}`);
+          if (userCached) {
+            const parsed = JSON.parse(userCached);
+            if (Array.isArray(parsed) && parsed.length > 0) {
+              setConversationTurns(parsed);
+            }
+          }
+        }
+      } catch {}
+    }
+  }, [user?.id, conversationTurns.length]);
+
+  // Lock body scroll when sources drawer is open
+  useEffect(() => {
+    if (sourcesSidebarOpen) {
+      const prevOverflow = document.body.style.overflow;
+      document.body.style.overflow = 'hidden';
+      return () => {
+        document.body.style.overflow = prevOverflow;
+      };
+    }
+  }, [sourcesSidebarOpen]);
+
+  // Handle ESC key to close sources drawer
+  useEffect(() => {
+    if (!sourcesSidebarOpen) return;
+    const handleKeyDown = (e) => {
+      if (e.key === 'Escape') setSourcesSidebarOpen(false);
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [sourcesSidebarOpen]);
+
+  // Scroll active citation card into view in drawer
+  useEffect(() => {
+    if (sourcesSidebarOpen && activeSourceIndex !== null) {
+      const timer = setTimeout(() => {
+        const el = document.getElementById(`drawer-source-${activeSourceIndex}`);
+        if (el) {
+          el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        }
+      }, 60);
+      return () => clearTimeout(timer);
+    }
+  }, [sourcesSidebarOpen, activeSourceIndex]);
+
+  // Reset printTurnId after printing
+  useEffect(() => {
+    const handleAfterPrint = () => setPrintTurnId(null);
+    window.addEventListener('afterprint', handleAfterPrint);
+    return () => window.removeEventListener('afterprint', handleAfterPrint);
+  }, []);
+
+  // Auto-scroll stream to bottom when conversation updates
+  useEffect(() => {
+    if (streamEndRef.current && conversationTurns.length > 0) {
+      streamEndRef.current.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [conversationTurns.length, qaLoading]);
 
   useEffect(() => {
     function handleClickOutside(event) {
@@ -1245,7 +1368,22 @@ export default function App() {
     if (overrideMarks) setTargetMarks(overrideMarks);
     setEffortPopoverOpen(false);
     setQaLoading(true);
-    setQaResult(null);
+
+    const turnId = `turn-${Date.now()}`;
+    const newTurn = {
+      id: turnId,
+      question: qToUse,
+      targetMarks: marksToUse,
+      moduleFilter: moduleFilter ? parseInt(moduleFilter) : null,
+      subject,
+      answer: '',
+      citations: [],
+      isStreaming: true,
+      timestamp: new Date().toISOString()
+    };
+
+    setConversationTurns(prev => [...prev, newTurn]);
+    setQuestion('');
     setDisplayedAnswer('');
     setIsTyping(true);
 
@@ -1290,11 +1428,15 @@ export default function App() {
             if (event.type === 'meta') {
               citations = event.citations || [];
               provider = event.provider || '';
+              setDrawerCitations(citations);
+              setConversationTurns(prev => prev.map(t => t.id === turnId ? { ...t, citations } : t));
             } else if (event.type === 'token') {
               fullText += event.content;
               setDisplayedAnswer(fullText);
+              setConversationTurns(prev => prev.map(t => t.id === turnId ? { ...t, answer: fullText } : t));
             } else if (event.type === 'done') {
               setIsTyping(false);
+              setConversationTurns(prev => prev.map(t => t.id === turnId ? { ...t, isStreaming: false } : t));
             } else if (event.type === 'error') {
               throw new Error(event.content);
             }
@@ -1312,6 +1454,8 @@ export default function App() {
         retrieval_latency_ms: 0
       };
       setQaResult(newResult);
+      setDrawerCitations(citations);
+      setConversationTurns(prev => prev.map(t => t.id === turnId ? { ...t, answer: fullText, citations, isStreaming: false } : t));
 
       // Record to history optimistically
       if (fullText) {
@@ -1344,24 +1488,38 @@ export default function App() {
     } catch (err) {
       toast(`Query error: ${err.message}`, 'error');
       const fallback = `## Error Generating Answer\n\n${err.message}\n\nPlease verify that your document is ingested into the Vault.`;
-      setQaResult({ question, target_marks: targetMarks, generated_answer: fallback, citations: [], retrieval_latency_ms: 0 });
+      setQaResult({ question: qToUse, target_marks: marksToUse, generated_answer: fallback, citations: [], retrieval_latency_ms: 0 });
       setDisplayedAnswer(fallback);
+      setConversationTurns(prev => prev.map(t => t.id === turnId ? { ...t, answer: fallback, isStreaming: false } : t));
       setIsTyping(false);
     } finally {
       setQaLoading(false);
     }
   };
 
-  const saveToBank = async () => {
-    if (!qaResult) return;
+  const openSourcesForTurn = (turn, sourceIdx = null) => {
+    setDrawerCitations(turn.citations || []);
+    setActiveSourceIndex(sourceIdx);
+    setSourcesSidebarOpen(true);
+  };
+
+  const saveToBank = async (turnItem = null) => {
+    const target = turnItem || qaResult;
+    if (!target) return;
+    const q = target.question;
+    const marks = target.targetMarks || target.target_marks || targetMarks;
+    const ans = target.answer || target.generated_answer;
+    const cits = target.citations || [];
+    const subj = target.subject || subject;
+
     const newItem = {
       id: String(Date.now()),
-      question: qaResult.question,
-      target_marks: qaResult.target_marks,
-      subject,
-      generated_answer: qaResult.generated_answer,
-      citations: qaResult.citations,
-      tags: [subject, `${targetMarks}-mark`],
+      question: q,
+      target_marks: marks,
+      subject: subj,
+      generated_answer: ans,
+      citations: cits,
+      tags: [subj, `${marks}-mark`],
       saved_at: new Date().toISOString()
     };
     // Optimistic bank update
@@ -1378,12 +1536,12 @@ export default function App() {
         method: 'POST',
         headers,
         body: JSON.stringify({
-          question: qaResult.question,
-          target_marks: qaResult.target_marks,
-          subject,
-          generated_answer: qaResult.generated_answer,
-          citations: qaResult.citations,
-          tags: [subject, `${targetMarks}-mark`]
+          question: q,
+          target_marks: marks,
+          subject: subj,
+          generated_answer: ans,
+          citations: cits,
+          tags: [subj, `${marks}-mark`]
         })
       });
     } catch {
@@ -1391,9 +1549,10 @@ export default function App() {
     }
   };
 
-  const copyAnswer = () => {
-    if (!qaResult?.generated_answer) return;
-    navigator.clipboard.writeText(qaResult.generated_answer);
+  const copyAnswer = (textToCopy = null) => {
+    const text = typeof textToCopy === 'string' ? textToCopy : (qaResult?.generated_answer || displayedAnswer);
+    if (!text) return;
+    navigator.clipboard.writeText(text);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
     toast('Answer copied to clipboard', 'success');
@@ -1727,9 +1886,8 @@ export default function App() {
               {/* Central Stream Area */}
               <div className="chatgpt-stream-scroll">
                 <div className="chatgpt-stream-content">
-
                   {/* Empty Hero State (Before Asking Query) */}
-                  {!displayedAnswer && !qaLoading && (
+                  {conversationTurns.length === 0 && !qaLoading && (
                     <div className="chatgpt-hero-landing">
                       <div className="chatgpt-hero-icon">
                         <Zap size={26} />
@@ -1767,106 +1925,197 @@ export default function App() {
                     </div>
                   )}
 
-                  {/* Loading State Skeleton */}
-                  {qaLoading && !displayedAnswer && (
-                    <div className="chatgpt-turn assistant-turn">
-                      <div className="turn-avatar ai-avatar"><Sparkles size={16} /></div>
-                      <div style={{ flex: 1 }}>
-                        <div className="chatgpt-thinking-pill" style={{ marginBottom: 14 }}>
-                          <RefreshCw size={12} className="animate-spin" />
-                          <span>Searching Qdrant dense vectors & synthesizing {targetMarks}-mark response...</span>
-                        </div>
-                        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-                          {[88, 72, 94, 60, 80].map((w, i) => (
-                            <div key={i} className="skeleton" style={{ height: 14, width: `${w}%` }} />
-                          ))}
-                        </div>
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Generated Answer Thread */}
-                  {displayedAnswer && (
+                  {/* Multi-Turn Conversation Thread (Older chats are fully visible in the session) */}
+                  {conversationTurns.length > 0 && (
                     <div className="chatgpt-conversation-thread">
-                      {/* User Turn */}
-                      <div className="chatgpt-turn user-turn">
-                        <div className="turn-avatar user-avatar"><User size={16} /></div>
-                        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', maxWidth: '85%' }}>
-                          <div className="user-question-bubble">
-                            {qaResult?.question || question}
-                          </div>
-                          <div className="user-turn-meta">
-                            <span className="badge-tag badge-cyan">{targetMarks} Marks</span>
-                            {moduleFilter && <span className="badge-tag badge-indigo">Module {moduleFilter}</span>}
-                            <span className="badge-tag">{subject}</span>
-                          </div>
+                      {/* Thread Control Header */}
+                      <div className="chatgpt-thread-header no-print">
+                        <div className="chatgpt-thread-info">
+                          <span className="thread-title">{subject} Examination Thread</span>
+                          <span className="thread-count-badge">
+                            {conversationTurns.length} {conversationTurns.length === 1 ? 'Turn' : 'Turns'}
+                          </span>
                         </div>
+                        <button
+                          type="button"
+                          className="chatgpt-clear-thread-btn"
+                          onClick={() => {
+                            setConversationTurns([]);
+                            setQaResult(null);
+                            setDisplayedAnswer('');
+                            try {
+                              localStorage.removeItem('rad_active_conversation_turns');
+                              localStorage.removeItem(`rad_conversation_${user?.id || 'guest'}`);
+                            } catch {}
+                            toast('New conversation started', 'info');
+                          }}
+                          title="Start fresh conversation"
+                        >
+                          <RotateCcw size={12} />
+                          <span>New Chat</span>
+                        </button>
                       </div>
 
-                      {/* Assistant Turn: Main Answer */}
-                      <div className="chatgpt-response-layout">
-                        {/* Main Synthesized Answer */}
-                        <div className="main-answer-card">
-                          <div className="turn-header-row">
-                            <div className="turn-avatar ai-avatar"><Sparkles size={16} /></div>
-                            <div className="chatgpt-thinking-pill">
-                              <Zap size={13} style={{ color: '#E4E4E7' }} />
-                              <span>Synthesized {targetMarks}-Mark Solution {qaResult?.retrieval_latency_ms ? `· ${qaResult.retrieval_latency_ms}ms` : ''}</span>
+                      {conversationTurns.map((turn, tIdx) => (
+                        <div
+                          key={turn.id || tIdx}
+                          className={`chatgpt-turn-pair ${printTurnId && printTurnId !== turn.id ? 'no-print' : 'printable-turn'}`}
+                        >
+                          {/* Printable University Exam Header (shown ONLY when printing this turn) */}
+                          <div className="print-only-exam-header">
+                            <div className="print-brand-bar">
+                              <div className="print-brand-title">RAD-UniQA · University Examination Solution</div>
+                              <div className="print-date">
+                                {new Date(turn.timestamp || Date.now()).toLocaleDateString(undefined, { year: 'numeric', month: 'long', day: 'numeric' })}
+                              </div>
                             </div>
-                            {isTyping && <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>streaming...</span>}
+                            <div className="print-meta-grid">
+                              <div><strong>Subject Arena:</strong> {turn.subject}</div>
+                              <div><strong>Target Marks:</strong> {turn.targetMarks} Marks Solution</div>
+                              {turn.moduleFilter && <div><strong>Module:</strong> Module {turn.moduleFilter}</div>}
+                              <div><strong>Verified Citations:</strong> {turn.citations?.length || 0} University Sources</div>
+                            </div>
                           </div>
 
-                          <div className="answer-prose">
-                            <RenderMarkdown text={displayedAnswer} />
-                            {isTyping && <span className="typewriter-cursor" />}
+                          {/* User Turn */}
+                          <div className="chatgpt-turn user-turn">
+                            <div className="turn-avatar user-avatar"><User size={16} /></div>
+                            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', maxWidth: '85%' }}>
+                              <div className="user-question-bubble">
+                                {turn.question}
+                              </div>
+                              <div className="user-turn-meta">
+                                <span className="badge-tag badge-cyan">{turn.targetMarks} Marks</span>
+                                {turn.moduleFilter && <span className="badge-tag badge-indigo">Module {turn.moduleFilter}</span>}
+                                <span className="badge-tag">{turn.subject}</span>
+                              </div>
+                            </div>
                           </div>
 
-                          {/* Toolbar Actions */}
-                          <div className="chatgpt-actions-toolbar">
-                            <button
-                              type="button"
-                              className="chatgpt-action-btn sources-action-trigger"
-                              onClick={() => setSourcesSidebarOpen(true)}
-                              title="Open Grounding Sources & Citations Sidebar"
-                              style={{ background: 'rgba(255, 255, 255, 0.08)', color: '#FAFAFA' }}
-                            >
-                              <BookOpen size={14} />
-                              <span>Sources ({qaResult?.citations?.length || 0})</span>
-                            </button>
-                            <button className="chatgpt-action-btn" onClick={copyAnswer} title="Copy Answer">
-                              {copied ? <Check size={14} style={{ color: 'var(--emerald)' }} /> : <Copy size={14} />}
-                              <span>{copied ? 'Copied' : 'Copy'}</span>
-                            </button>
-                            <button className="chatgpt-action-btn" onClick={() => window.print()} title="Print as PDF">
-                              <Printer size={14} />
-                              <span>Print PDF</span>
-                            </button>
-                            <button className="chatgpt-action-btn" onClick={saveToBank} title="Save to Question Bank">
-                              <BookMarked size={14} />
-                              <span>Save to Bank</span>
-                            </button>
-                            {isTyping && (
-                              <button className="chatgpt-action-btn" onClick={() => { clearInterval(typingRef.current); setDisplayedAnswer(qaResult?.generated_answer || displayedAnswer); setIsTyping(false); }}>
-                                <span>Skip Typing</span>
-                              </button>
-                            )}
+                          {/* Assistant Turn: Main Synthesized Answer */}
+                          <div className="chatgpt-response-layout">
+                            <div className="main-answer-card">
+                              <div className="turn-header-row">
+                                <div className="turn-avatar ai-avatar"><Sparkles size={16} /></div>
+                                <div className="chatgpt-thinking-pill">
+                                  <Zap size={13} style={{ color: '#E4E4E7' }} />
+                                  <span>Synthesized {turn.targetMarks}-Mark Solution</span>
+                                </div>
+                                {turn.isStreaming && <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>streaming...</span>}
+                              </div>
+
+                              <div className="answer-prose">
+                                {turn.answer ? (
+                                  <RenderMarkdown text={turn.answer} />
+                                ) : (
+                                  <div style={{ display: 'flex', flexDirection: 'column', gap: 10, padding: '12px 0' }}>
+                                    {[88, 72, 94, 60, 80].map((w, i) => (
+                                      <div key={i} className="skeleton" style={{ height: 14, width: `${w}%` }} />
+                                    ))}
+                                  </div>
+                                )}
+                                {turn.isStreaming && <span className="typewriter-cursor" />}
+                              </div>
+
+                              {/* Print Citations Section (Visible in print) */}
+                              {turn.citations && turn.citations.length > 0 && (
+                                <div className="print-only-citations">
+                                  <div className="print-citations-title">Verified Grounding Sources:</div>
+                                  <ol className="print-citations-list">
+                                    {turn.citations.map((c, cIdx) => (
+                                      <li key={cIdx}>
+                                        <strong>{c.source}</strong>
+                                        {c.module_number ? ` (Module ${c.module_number})` : ''}
+                                        {c.page_number ? ` · Page ${c.page_number}` : ''}
+                                        {c.relevance ? ` · Match ${(c.relevance * 100).toFixed(0)}%` : ''}
+                                      </li>
+                                    ))}
+                                  </ol>
+                                </div>
+                              )}
+
+                              {/* Toolbar Actions (no-print) */}
+                              <div className="chatgpt-actions-toolbar no-print">
+                                {/* Individual Source Buttons Beside Print PDF & Copy (Requirement 3) */}
+                                {turn.citations && turn.citations.length > 0 && (
+                                  <div className="chatgpt-sources-chips-group">
+                                    {turn.citations.map((c, cIdx) => {
+                                      const rawName = c.source || `Source ${cIdx + 1}`;
+                                      const cleanName = rawName.replace(/\.pdf$/i, '').replace(/_/g, ' ');
+                                      const shortName = cleanName.length > 18 ? cleanName.slice(0, 16) + '…' : cleanName;
+                                      const modTag = c.module_number ? `M${c.module_number}` : (c.page_number ? `P.${c.page_number}` : null);
+
+                                      return (
+                                        <button
+                                          key={cIdx}
+                                          type="button"
+                                          className={`chatgpt-action-btn source-chip-btn ${activeSourceIndex === cIdx && sourcesSidebarOpen ? 'active-source' : ''}`}
+                                          onClick={() => openSourcesForTurn(turn, cIdx)}
+                                          title={`View grounding text from ${rawName}${modTag ? ` (${modTag})` : ''}`}
+                                        >
+                                          <FileText size={13} style={{ color: '#A1A1AA' }} />
+                                          <span className="source-chip-label">{shortName}</span>
+                                          {modTag && <span className="source-chip-badge">{modTag}</span>}
+                                        </button>
+                                      );
+                                    })}
+                                  </div>
+                                )}
+
+                                {/* General Utility Buttons */}
+                                <button className="chatgpt-action-btn" onClick={() => copyAnswer(turn.answer)} title="Copy Answer">
+                                  {copied ? <Check size={14} style={{ color: 'var(--emerald)' }} /> : <Copy size={14} />}
+                                  <span>{copied ? 'Copied' : 'Copy'}</span>
+                                </button>
+                                <button
+                                  className="chatgpt-action-btn"
+                                  onClick={() => {
+                                    setPrintTurnId(turn.id);
+                                    setTimeout(() => window.print(), 80);
+                                  }}
+                                  title="Print this question and solution as PDF"
+                                >
+                                  <Printer size={14} />
+                                  <span>Print PDF</span>
+                                </button>
+                                <button className="chatgpt-action-btn" onClick={() => saveToBank(turn)} title="Save to Question Bank">
+                                  <BookMarked size={14} />
+                                  <span>Save to Bank</span>
+                                </button>
+                                {turn.isStreaming && (
+                                  <button
+                                    className="chatgpt-action-btn"
+                                    onClick={() => {
+                                      setConversationTurns(prev => prev.map(t => t.id === turn.id ? { ...t, isStreaming: false } : t));
+                                      setIsTyping(false);
+                                    }}
+                                  >
+                                    <span>Skip Typing</span>
+                                  </button>
+                                )}
+                              </div>
+                            </div>
                           </div>
                         </div>
-                      </div>
+                      ))}
+
+                      <div ref={streamEndRef} style={{ height: 1 }} />
                     </div>
                   )}
 
                   {/* Floating Right Toggle Bar for Sources (Point 5) */}
-                  {qaResult && (
+                  {(conversationTurns.length > 0 || qaResult) && (
                     <button
                       type="button"
-                      className="sources-floating-toggle-btn"
+                      className="sources-floating-toggle-btn no-print"
                       onClick={() => setSourcesSidebarOpen(o => !o)}
                       title="Toggle Reference Sources Sidebar"
                     >
                       <BookOpen size={14} />
                       <span>Sources</span>
-                      <span className="sources-count-badge">{qaResult?.citations?.length || 0}</span>
+                      <span className="sources-count-badge">
+                        {(drawerCitations.length > 0 ? drawerCitations : (qaResult?.citations || [])).length}
+                      </span>
                     </button>
                   )}
 
@@ -1874,10 +2123,10 @@ export default function App() {
               </div>
 
               {/* Fixed Bottom Input Bar (ChatGPT-style!) */}
-              <div className="chatgpt-bottom-bar-container">
+              <div className="chatgpt-bottom-bar-container no-print">
                 <div className="chatgpt-input-box">
 
-                  {/* Floating Horizontal Effort Slider Popover (Exact Match to Screenshot!) */}
+                  {/* Floating Horizontal Effort Slider Popover */}
                   {effortPopoverOpen && (
                     <div className="chatgpt-effort-popover" ref={effortPopoverRef}>
                       <div className="popover-top-row">
@@ -1972,21 +2221,21 @@ export default function App() {
 
                   {/* Input Footer Controls */}
                   <div className="chatgpt-input-footer">
-                    {/* Left Tools: Subject & Module */}
+                    {/* Left Tools: Subject & Module (Requirement 1: Max 6 modules & widened tabs) */}
                     <div className="chatgpt-input-tools-left">
                       <div className="chatgpt-pill-tool" title="Active Subject">
-                        <BookOpen size={12} />
+                        <BookOpen size={13} />
                         <span>{subject}</span>
                       </div>
-                      <div className="chatgpt-module-selector" title="Filter by Module">
-                        <span>Mod:</span>
+                      <div className="chatgpt-module-selector" title="Filter by Module (Max 6 Modules)">
+                        <span className="module-tag-label">Mod:</span>
                         <select
                           className="chatgpt-module-select"
                           value={moduleFilter}
                           onChange={e => setModuleFilter(e.target.value)}
                         >
                           <option value="">All</option>
-                          {[1, 2, 3, 4, 5, 6, 7, 8].map(m => (
+                          {[1, 2, 3, 4, 5, 6].map(m => (
                             <option key={m} value={m}>M{m}</option>
                           ))}
                         </select>
@@ -2002,7 +2251,7 @@ export default function App() {
                         onClick={() => setEffortPopoverOpen(o => !o)}
                         title="Select Reasoning Effort & Target Marks"
                       >
-                        <Zap size={13} className="trigger-zap-icon" />
+                        <Zap size={14} className="trigger-zap-icon" />
                         <span className="trigger-text">
                           {targetMarks === 2 ? 'Low · 2M' : targetMarks === 5 ? 'Medium · 5M' : 'High · 10M'}
                         </span>
@@ -2033,114 +2282,118 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Slide-In Right Drawer for Sources (Point 5) */}
-              <div
-                className={`sources-drawer-backdrop ${sourcesSidebarOpen ? 'open' : ''}`}
-                onClick={() => setSourcesSidebarOpen(false)}
-              >
-                <div className="sources-drawer-panel" onClick={e => e.stopPropagation()}>
-                  <div className="sources-drawer-header">
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                      <BookOpen size={16} style={{ color: '#FAFAFA' }} />
-                      <span style={{ fontWeight: 600, color: '#FAFAFA', fontSize: '0.92rem' }}>
-                        Reference Sources
-                      </span>
-                      <span className="sources-toggle-badge">
-                        {qaResult?.citations?.length || 0} Sources
-                      </span>
-                    </div>
-                    <button
-                      type="button"
-                      className="btn btn-ghost btn-icon-square"
-                      onClick={() => setSourcesSidebarOpen(false)}
-                      title="Close Sources Sidebar"
-                    >
-                      <X size={15} />
-                    </button>
-                  </div>
-
-                  <div className="sources-drawer-body">
-                    {/* Grounding Status */}
-                    <div style={{
-                      display: 'flex', alignItems: 'center', gap: 10,
-                      padding: '10px 14px', borderRadius: 8,
-                      background: 'rgba(255, 255, 255, 0.04)',
-                      border: '1px solid rgba(255, 255, 255, 0.08)'
-                    }}>
-                      <CheckCircle2 size={15} style={{ color: '#34D399', flexShrink: 0 }} />
-                      <div style={{ fontSize: '0.76rem', color: '#D4D4D8', lineHeight: 1.4 }}>
-                        Grounding verified with indexed course materials from <strong>{subject}</strong>.
+              {/* Slide-In Right Drawer for Sources Portalled to document.body (Requirement 3) */}
+              {createPortal(
+                <div
+                  className={`sources-drawer-backdrop ${sourcesSidebarOpen ? 'open' : ''}`}
+                  onClick={() => setSourcesSidebarOpen(false)}
+                >
+                  <div className="sources-drawer-panel" onClick={e => e.stopPropagation()}>
+                    <div className="sources-drawer-header">
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                        <BookOpen size={16} style={{ color: '#FAFAFA' }} />
+                        <span style={{ fontWeight: 600, color: '#FAFAFA', fontSize: '0.92rem' }}>
+                          Reference Sources
+                        </span>
+                        <span className="sources-toggle-badge">
+                          {(drawerCitations.length > 0 ? drawerCitations : (qaResult?.citations || [])).length} Sources
+                        </span>
                       </div>
+                      <button
+                        type="button"
+                        className="btn btn-ghost btn-icon-square"
+                        onClick={() => setSourcesSidebarOpen(false)}
+                        title="Close Sources Sidebar"
+                      >
+                        <X size={15} />
+                      </button>
                     </div>
 
-                    {/* Citations List */}
-                    <div className="drawer-section">
-                      <div className="drawer-section-title">Cited Course Modules & Documents</div>
-                      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                        {qaResult?.citations && qaResult.citations.length > 0 ? (
-                          qaResult.citations.map((c, i) => (
-                            <div
-                              key={i}
-                              className={`drawer-source-card ${activeSourceIndex === i ? 'highlighted' : ''}`}
-                              onClick={() => setActiveSourceIndex(activeSourceIndex === i ? null : i)}
-                            >
-                              <div className="drawer-source-top">
-                                <FileText size={15} style={{ color: '#E4E4E7', flexShrink: 0 }} />
-                                <span className="drawer-source-name" title={c.source}>{c.source}</span>
-                              </div>
-                              <div className="drawer-source-meta">
-                                {c.module_number && (
-                                  <span className="badge-tag badge-cyan">Module {c.module_number}</span>
-                                )}
-                                {c.page_number && (
-                                  <span className="badge-tag">Page {c.page_number}</span>
-                                )}
-                                {c.relevance && (
-                                  <span className="badge-tag badge-emerald">{(c.relevance * 100).toFixed(0)}% Match</span>
-                                )}
-                              </div>
-                              {c.text && (
-                                <div className="drawer-source-snippet">
-                                  "{c.text.slice(0, 160)}..."
+                    <div className="sources-drawer-body">
+                      {/* Grounding Status */}
+                      <div style={{
+                        display: 'flex', alignItems: 'center', gap: 10,
+                        padding: '10px 14px', borderRadius: 8,
+                        background: 'rgba(255, 255, 255, 0.04)',
+                        border: '1px solid rgba(255, 255, 255, 0.08)'
+                      }}>
+                        <CheckCircle2 size={15} style={{ color: '#34D399', flexShrink: 0 }} />
+                        <div style={{ fontSize: '0.76rem', color: '#D4D4D8', lineHeight: 1.4 }}>
+                          Grounding verified with indexed course materials from <strong>{subject}</strong>.
+                        </div>
+                      </div>
+
+                      {/* Citations List */}
+                      <div className="drawer-section">
+                        <div className="drawer-section-title">Cited Course Modules & Documents</div>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                          {(drawerCitations.length > 0 ? drawerCitations : (qaResult?.citations || [])).length > 0 ? (
+                            (drawerCitations.length > 0 ? drawerCitations : (qaResult?.citations || [])).map((c, i) => (
+                              <div
+                                key={i}
+                                id={`drawer-source-${i}`}
+                                className={`drawer-source-card ${activeSourceIndex === i ? 'highlighted' : ''}`}
+                                onClick={() => setActiveSourceIndex(activeSourceIndex === i ? null : i)}
+                              >
+                                <div className="drawer-source-top">
+                                  <FileText size={15} style={{ color: '#E4E4E7', flexShrink: 0 }} />
+                                  <span className="drawer-source-name" title={c.source}>{c.source}</span>
                                 </div>
-                              )}
+                                <div className="drawer-source-meta">
+                                  {c.module_number && (
+                                    <span className="badge-tag badge-cyan">Module {c.module_number}</span>
+                                  )}
+                                  {c.page_number && (
+                                    <span className="badge-tag">Page {c.page_number}</span>
+                                  )}
+                                  {c.relevance && (
+                                    <span className="badge-tag badge-emerald">{(c.relevance * 100).toFixed(0)}% Match</span>
+                                  )}
+                                </div>
+                                {c.text && (
+                                  <div className="drawer-source-snippet">
+                                    "{c.text.slice(0, 160)}..."
+                                  </div>
+                                )}
+                              </div>
+                            ))
+                          ) : (
+                            <div className="drawer-empty-state">
+                              <span>Standard university syllabus reference and core textbooks.</span>
                             </div>
-                          ))
-                        ) : (
-                          <div className="drawer-empty-state">
-                            <span>Standard university syllabus reference and core textbooks.</span>
-                          </div>
-                        )}
-                      </div>
-                    </div>
-
-                    {/* Generated Outputs / Artifacts */}
-                    <div className="drawer-section">
-                      <div className="drawer-section-title">Outputs & Study Artifacts</div>
-                      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                        <div className="drawer-item-card" onClick={() => window.print()} title="Print or save Solution as PDF">
-                          <Printer size={16} style={{ color: '#FAFAFA' }} />
-                          <div className="drawer-item-info">
-                            <span className="drawer-item-name">{`Solution_${targetMarks}M_${subject}.pdf`}</span>
-                            <span className="drawer-item-sub">Ready to print or export</span>
-                          </div>
+                          )}
                         </div>
-                        <div className="drawer-item-card" onClick={saveToBank} title="Save to Question Bank">
-                          <BookMarked size={16} style={{ color: '#FAFAFA' }} />
-                          <div className="drawer-item-info">
-                            <span className="drawer-item-name">Question Bank Entry</span>
-                            <span className="drawer-item-sub">Add to revision deck</span>
+                      </div>
+
+                      {/* Generated Outputs / Artifacts */}
+                      <div className="drawer-section">
+                        <div className="drawer-section-title">Outputs & Study Artifacts</div>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                          <div className="drawer-item-card" onClick={() => window.print()} title="Print or save Solution as PDF">
+                            <Printer size={16} style={{ color: '#FAFAFA' }} />
+                            <div className="drawer-item-info">
+                              <span className="drawer-item-name">{`Solution_${targetMarks}M_${subject}.pdf`}</span>
+                              <span className="drawer-item-sub">Ready to print or export</span>
+                            </div>
+                          </div>
+                          <div className="drawer-item-card" onClick={() => saveToBank()} title="Save to Question Bank">
+                            <BookMarked size={16} style={{ color: '#FAFAFA' }} />
+                            <div className="drawer-item-info">
+                              <span className="drawer-item-name">Question Bank Entry</span>
+                              <span className="drawer-item-sub">Add to revision deck</span>
+                            </div>
                           </div>
                         </div>
                       </div>
                     </div>
-                  </div>
 
-                  <div className="sources-drawer-footer">
-                    Eduniti RAG Grounding Engine · Powered by Qdrant Vector Search
+                    <div className="sources-drawer-footer">
+                      Eduniti RAG Grounding Engine · Powered by Qdrant Vector Search
+                    </div>
                   </div>
-                </div>
-              </div>
+                </div>,
+                document.body
+              )}
             </div>
           )}
 
@@ -2166,9 +2419,32 @@ export default function App() {
                   <div className="glass-panel-elevated">
                     <div className="answer-toolbar">
                       <span style={{ fontSize: '0.88rem', fontWeight: 600 }}>{selectedHistoryItem.question}</span>
-                      <div style={{ display: 'flex', gap: 6 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                         <span className="badge-tag badge-indigo">{selectedHistoryItem.target_marks} Marks</span>
                         <span className="badge-tag badge-cyan">{selectedHistoryItem.latency_ms}ms</span>
+                        <button
+                          type="button"
+                          className="btn btn-secondary"
+                          style={{ padding: '4px 10px', fontSize: '0.74rem', gap: 4 }}
+                          onClick={() => {
+                            const newTurn = {
+                              id: `turn-${Date.now()}`,
+                              question: selectedHistoryItem.question,
+                              targetMarks: selectedHistoryItem.target_marks || 5,
+                              subject: selectedHistoryItem.subject || subject || 'All Subjects',
+                              moduleFilter: selectedHistoryItem.module_filter || null,
+                              answer: selectedHistoryItem.generated_answer,
+                              citations: selectedHistoryItem.citations || [],
+                              isStreaming: false,
+                              timestamp: selectedHistoryItem.timestamp || new Date().toISOString()
+                            };
+                            setConversationTurns(prev => [...prev, newTurn]);
+                            setTab('qa');
+                            toast('Restored into active conversation thread', 'success');
+                          }}
+                        >
+                          <Sparkles size={12} /> Continue in Chat
+                        </button>
                       </div>
                     </div>
                     <div className="answer-body">
