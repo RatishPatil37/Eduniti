@@ -426,14 +426,26 @@ const MermaidBlock = memo(function MermaidBlock({ code }) {
 });
 
 
-// Normalizes LaTeX math, single dollar signs, naked equations, and Markdown GFM tables
-// Normalizes LaTeX math, single dollar signs, naked equations, and Markdown GFM tables
+// Normalizes LaTeX math, naked equations, Markdown GFM tables, and code-block content
 function normalizeMarkdown(rawText) {
   if (!rawText) return '';
 
   let text = rawText;
 
-  // 1. Auto-correct common LLM LaTeX typos and KaTeX incompatibilities
+  // ═══════════════════════════════════════════════════════════════════════════
+  // PHASE 0 — Extract & protect fenced code blocks from ALL transformations.
+  // Without this, every regex below corrupts pseudocode & algorithm steps.
+  // ═══════════════════════════════════════════════════════════════════════════
+  const protectedCodeBlocks = [];
+  text = text.replace(/```[\s\S]*?(?:```|$)/g, (match) => {
+    const idx = protectedCodeBlocks.length;
+    protectedCodeBlocks.push(match);
+    return `\x00CODEBLOCK${idx}\x00`;
+  });
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // 1. Auto-correct LLM LaTeX typos & KaTeX-incompatible macros
+  // ═══════════════════════════════════════════════════════════════════════════
   text = text.replace(/\\left\\floor\b/g, '\\left\\lfloor');
   text = text.replace(/\\right\\floor\b/g, '\\right\\rfloor');
   text = text.replace(/\\floor\b/g, '\\lfloor');
@@ -447,165 +459,179 @@ function normalizeMarkdown(rawText) {
   text = text.replace(/\\Subsampling\b/g, 'Subsampling');
   text = text.replace(/\\argmax\b/g, '\\operatorname{argmax}');
   text = text.replace(/\\argmin\b/g, '\\operatorname{argmin}');
+  // Fix inline math surrounding spaces: $ x = y $ → $x = y$
+  text = text.replace(/\$\s+([^$\n]+?)\s+\$/g, '$$$1$$');
 
-  // 2. Separate horizontal rules (---) cleanly with double newlines
-  text = text.replace(/([^\n])\s*---\s*([^\n])/g, '$1\n\n---\n\n$2');
-  text = text.replace(/([^\n])\s+---\s*$/gm, '$1\n\n---\n\n');
+  // ═══════════════════════════════════════════════════════════════════════════
+  // 2. Fix horizontal rules (---) — CRITICAL: NEVER touch table separator rows.
+  //
+  // BUG FIXED: old regex /([^\n])\s*---\s*([^\n])/g matched ":" + "---" + " "
+  // in "| :--- | :--- |" → turned it into ":\n\n---\n\n " destroying the
+  // table separator row and making every table unrenderable.
+  //
+  // Fix: line-by-line; skip any line matching a GFM table separator pattern.
+  // ═══════════════════════════════════════════════════════════════════════════
+  {
+    const sepLines = text.split('\n');
+    text = sepLines.map(line => {
+      const t = line.trim();
+      // Table separator rows: only |, -, :, whitespace → preserve exactly
+      if (/^\|[\s|:*-]+\|?\s*$/.test(t)) return line;
+      return line
+        .replace(/([^-\n|>:])\s*---\s*([^-\n|>:])/g, '$1\n\n---\n\n$2')
+        .replace(/([^-\n|>:])\s*---\s*$/g, '$1\n\n---\n\n');
+    }).join('\n');
+  }
 
-  // 3. Separate Markdown headers (##, ###, etc.) from preceding text and each other
+  // ═══════════════════════════════════════════════════════════════════════════
+  // 3. Separate Markdown headers from preceding text
+  // ═══════════════════════════════════════════════════════════════════════════
   text = text.replace(/([^\n])\s+(#{1,6}\s+[^\n]+)/g, '$1\n\n$2');
   text = text.replace(/(#{1,6}\s+[^#\n]+?)\s+(#{1,6}\s+)/g, '$1\n\n$2');
 
-  // 4. Split and format "**Where:**" parameter breakdown lists cleanly
+  // ═══════════════════════════════════════════════════════════════════════════
+  // 4. Format **Where:** / **Note:** parameter lists onto clean bullet lines
+  // ═══════════════════════════════════════════════════════════════════════════
   text = text.replace(/(\*\*(?:Where|Note|Definition|Parameters?):\*\*)\s*(?:-\s*)?/gi, '\n\n$1\n\n- ');
   text = text.replace(/([^\n])\s+-\s+(\$[^$]+\$:)/g, '$1\n- $2');
 
-  // 5. Fix single-line concatenated table rows (e.g. "| a | b | | --- | --- | | c | d |" -> "|\n|")
-  text = text.replace(/\|\s*\|\s*(?=[^:\n|]*[:\w-])/g, '|\n|');
-
-  // 6. Fix broken inline LaTeX with newlines before closing dollars ($x \in R^d\n$)
+  // ═══════════════════════════════════════════════════════════════════════════
+  // 5. Fix broken inline LaTeX split across newlines: "$x\n$" → "$x$"
+  // ═══════════════════════════════════════════════════════════════════════════
   text = text.replace(/\$([^$\n]+?)\n\s*(\$,|\$\.|\$\:|\$)/g, (match, expr, trailing) => {
     const punct = trailing.startsWith('$') ? trailing.slice(1) : trailing;
-    return `$${expr.trim()}$${punct ? punct : ''}`;
+    return `$${expr.trim()}$${punct || ''}`;
   });
 
-  // 7. Remove accidental $$ math wrapping around plain English prose sentences
-  // (Fixes "The forward operation with an identity shortcut is defined as :" from rendering as smashed italic math)
+  // ═══════════════════════════════════════════════════════════════════════════
+  // 6. Unwrap accidental $$...$$ around plain English prose (smashed italic bug)
+  // ═══════════════════════════════════════════════════════════════════════════
   text = text.replace(/\$\$\s*([\s\S]*?)\s*\$\$/g, (match, inner) => {
     const trimmed = inner.trim();
-    if (!/[\\=^_{}+\-*/<>]/.test(trimmed) && trimmed.split(/\s+/).length >= 3) {
+    if (!/[\\=^_{}+\-*/]/.test(trimmed) && trimmed.split(/\s+/).length >= 3) {
       return `\n\n${trimmed}\n\n`;
     }
     return match;
   });
 
-  // 8. Remove standalone empty math blocks ($$$$, $$ $$, or empty lines between $$)
+  // ═══════════════════════════════════════════════════════════════════════════
+  // 7. Remove empty math blocks: $$$$, $$ $$, lone adjacent $$ pairs
+  // ═══════════════════════════════════════════════════════════════════════════
   text = text.replace(/\$\$\s*\$\$/g, '');
   text = text.replace(/\$\s*\n+\s*\$/g, '');
-
-  const rawLines = text.split('\n');
-  const cleanedMathLines = [];
-  for (let i = 0; i < rawLines.length; i++) {
-    const line = rawLines[i].trim();
-    const nextLine = (rawLines[i + 1] || '').trim();
-    if (line === '$$' && nextLine === '$$') {
-      i++;
-      continue;
+  {
+    const rawLines = text.split('\n');
+    const cleanedMath = [];
+    for (let i = 0; i < rawLines.length; i++) {
+      const line = rawLines[i].trim();
+      const nextLine = (rawLines[i + 1] || '').trim();
+      if (line === '$$' && nextLine === '$$') { i++; continue; }
+      if (line === '$$$$' || line === '$$ $$') { continue; }
+      cleanedMath.push(rawLines[i]);
     }
-    if (line === '$$$$' || line === '$$ $$' || line === '$$') {
-      const prevLine = (rawLines[i - 1] || '').trim();
-      if ((prevLine === '' || prevLine === '$$') && (nextLine === '' || nextLine === '$$')) {
-        continue;
-      }
-    }
-    cleanedMathLines.push(rawLines[i]);
-  }
-  text = cleanedMathLines.join('\n');
-
-  // 9. Universal Naked Equation Detector:
-  // Automatically wraps standalone mathematical equation lines in $$...$$
-  // Covers: \mathcal{F}(x) = ..., y = \mathcal{F}(...), \frac{\partial E}{\partial x} = ..., O = \left\lfloor...
-  const lines = text.split('\n');
-  const processedLines = [];
-  let inCodeBlock = false;
-  let inMathBlock = false;
-
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    const trimmed = line.trim();
-
-    if (trimmed.startsWith('```')) {
-      inCodeBlock = !inCodeBlock;
-      processedLines.push(line);
-      continue;
-    }
-    if (inCodeBlock) {
-      processedLines.push(line);
-      continue;
-    }
-
-    if (trimmed === '$$') {
-      inMathBlock = !inMathBlock;
-      processedLines.push(line);
-      continue;
-    }
-    if (trimmed.startsWith('$$') && trimmed.endsWith('$$') && trimmed.length > 2) {
-      processedLines.push(line);
-      continue;
-    }
-    if (inMathBlock) {
-      processedLines.push(line);
-      continue;
-    }
-
-    // Skip Markdown syntax lines
-    if (trimmed.startsWith('|') || trimmed.startsWith('#') || trimmed === '---' || trimmed.startsWith('>')) {
-      processedLines.push(line);
-      continue;
-    }
-
-    // Comprehensive mathematical notation patterns:
-    const hasLatexCommands = /\\(mathcal|mathbf|mathbb|frac|partial|sum|int|nabla|sigma|Sigma|alpha|beta|gamma|theta|lambda|mu|delta|Delta|omega|Omega|left|right|sqrt|hat|vec|cdot|times|odot|prod|approx|sim|le|ge|in|to|implies|tanh|sin|cos|exp|log|ln|infty|lfloor|rfloor|lceil|rceil|perp|top)\b/.test(trimmed);
-    const hasMathRelations = /[=≈≤≥∈→⇒≡∝~]/.test(trimmed) || /\\(approx|le|ge|in|to|implies|sim|equiv)/.test(trimmed);
-    const hasSubSuper = /[_^]\{?[a-zA-Z0-9+\-*=()]+\}?/.test(trimmed);
-
-    // Count regular prose words
-    const proseWordCount = (trimmed.match(/\b(the|is|are|where|with|we|let|for|and|in|because|have|substituting|therefore|which|then|defined|as|by|from|using|yields|such|that)\b/gi) || []).length;
-
-    // Detect if line is a naked mathematical formula
-    const isNakedMath = !trimmed.startsWith('$') && proseWordCount <= 1 && (
-      (hasLatexCommands && (hasMathRelations || trimmed.startsWith('\\') || trimmed.startsWith('O =') || trimmed.startsWith('y =') || trimmed.startsWith('z =') || trimmed.startsWith('f('))) ||
-      (hasMathRelations && hasSubSuper && /^[a-zA-Z0-9()\[\]\\_^{}\s=+*/\-]+$/.test(trimmed))
-    );
-
-    if (isNakedMath && !trimmed.startsWith('-') && !trimmed.startsWith('*')) {
-      processedLines.push('');
-      processedLines.push('$$');
-      processedLines.push(trimmed);
-      processedLines.push('$$');
-      processedLines.push('');
-    } else {
-      processedLines.push(line);
-    }
+    text = cleanedMath.join('\n');
   }
 
-  text = processedLines.join('\n');
+  // ═══════════════════════════════════════════════════════════════════════════
+  // 8. Universal Naked Equation Detector
+  //    Wraps standalone math-only lines in $$...$$ automatically.
+  //    Skips CODEBLOCK placeholders, table rows, list/heading markers.
+  // ═══════════════════════════════════════════════════════════════════════════
+  {
+    const eqLines = text.split('\n');
+    const out = [];
+    let inMathBlock = false;
 
-  // 10. Fix table rows broken by multi-line cells
-  const tblLines = text.split('\n');
-  const normalizedLines = [];
-  let inTable = false;
+    for (let i = 0; i < eqLines.length; i++) {
+      const line = eqLines[i];
+      const trimmed = line.trim();
 
-  for (let i = 0; i < tblLines.length; i++) {
-    let line = tblLines[i];
-    const isTableSeparator = /^\|?\s*:?-+:?\s*\|/.test(line.trim());
-    const isTableLine = line.trim().startsWith('|') && line.trim().endsWith('|');
+      if (/^\x00CODEBLOCK\d+\x00$/.test(trimmed)) { out.push(line); continue; }
+      if (trimmed === '$$') { inMathBlock = !inMathBlock; out.push(line); continue; }
+      if (trimmed.startsWith('$$') && trimmed.endsWith('$$') && trimmed.length > 2) { out.push(line); continue; }
+      if (inMathBlock) { out.push(line); continue; }
+      if (
+        trimmed.startsWith('|') || trimmed.startsWith('#') ||
+        trimmed === '---' || trimmed.startsWith('>') ||
+        trimmed.startsWith('-') || trimmed.startsWith('*') ||
+        /^\d+\./.test(trimmed)
+      ) { out.push(line); continue; }
 
-    if (isTableSeparator || isTableLine) {
-      inTable = true;
-      normalizedLines.push(line);
-    } else if (inTable && (line.trim().startsWith('$') || line.trim().includes('|')) && normalizedLines.length > 0) {
-      const prevLine = normalizedLines[normalizedLines.length - 1];
-      if (prevLine.trim().endsWith('|')) {
-        normalizedLines[normalizedLines.length - 1] = `${prevLine.slice(0, -1)} ${line.trim()} |`;
+      const hasLatexCmd = /\\(mathcal|mathbf|mathbb|frac|partial|sum|int|nabla|sigma|Sigma|alpha|beta|gamma|theta|lambda|mu|delta|Delta|omega|Omega|left|right|sqrt|hat|vec|cdot|times|odot|prod|approx|sim|le|ge|in|to|implies|tanh|sin|cos|exp|log|ln|infty|lfloor|rfloor|lceil|rceil|perp|top)\b/.test(trimmed);
+      const hasMathRel = /[=≈≤≥∈→⇒≡∝~]/.test(trimmed) || /\\(approx|le|ge|in|to|implies|sim|equiv)/.test(trimmed);
+      const hasSubSuper = /[_^]\{?[a-zA-Z0-9+\-*=()]+\}?/.test(trimmed);
+      const proseCount = (trimmed.match(/\b(the|is|are|where|with|we|let|for|and|in|because|have|substituting|therefore|which|then|defined|as|by|from|using|yields|such|that)\b/gi) || []).length;
+
+      const isNakedMath = !trimmed.startsWith('$') && proseCount <= 1 && (
+        (hasLatexCmd && (hasMathRel || trimmed.startsWith('\\') || /^[a-zA-Z]\s*=/.test(trimmed) || trimmed.startsWith('f('))) ||
+        (hasMathRel && hasSubSuper && /^[a-zA-Z0-9()\[\]\\_^{}\s=+*/\-]+$/.test(trimmed))
+      );
+
+      if (isNakedMath) {
+        out.push('');
+        out.push('$$');
+        out.push(trimmed);
+        out.push('$$');
+        out.push('');
       } else {
-        normalizedLines[normalizedLines.length - 1] += ` ${line.trim()}`;
+        out.push(line);
       }
-    } else {
-      inTable = false;
-      normalizedLines.push(line);
     }
+    text = out.join('\n');
   }
 
-  text = normalizedLines.join('\n');
+  // ═══════════════════════════════════════════════════════════════════════════
+  // 9. Markdown GFM Table Normalization
+  //    - Ensures blank lines before and after tables (tables fail without it)
+  // ═══════════════════════════════════════════════════════════════════════════
+  {
+    const tblLines = text.split('\n');
+    const normalizedLines = [];
+    let inTable = false;
 
-  // 11. Ensure $$ block math has surrounding blank lines for clean KaTeX display
+    for (let i = 0; i < tblLines.length; i++) {
+      const line = tblLines[i];
+      const trimmed = line.trim();
+      const isSep = /^\|?[\s:*-]+\|/.test(trimmed) && trimmed.includes('-');
+      const isRow = trimmed.startsWith('|') && trimmed.endsWith('|') && trimmed.length > 1;
+
+      if (isRow || isSep) {
+        if (!inTable) {
+          if (normalizedLines.length > 0 && normalizedLines[normalizedLines.length - 1].trim() !== '') {
+            normalizedLines.push('');
+          }
+          inTable = true;
+        }
+        normalizedLines.push(line);
+      } else {
+        if (inTable) {
+          normalizedLines.push('');
+          inTable = false;
+        }
+        normalizedLines.push(line);
+      }
+    }
+    text = normalizedLines.join('\n');
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // 10. Ensure $$ block math has surrounding blank lines for clean KaTeX display
+  // ═══════════════════════════════════════════════════════════════════════════
   text = text
     .replace(/([^\n])\$\$/g, '$1\n\n$$$$')
     .replace(/\$\$([^\n])/g, '$$$$\n\n$1');
 
-  // 12. Clean any remaining consecutive empty lines
+  // ═══════════════════════════════════════════════════════════════════════════
+  // 11. Clean consecutive empty lines (max 2 newlines)
+  // ═══════════════════════════════════════════════════════════════════════════
   text = text.replace(/\n{3,}/g, '\n\n');
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // PHASE FINAL — Restore protected code blocks exactly as they were!
+  // ═══════════════════════════════════════════════════════════════════════════
+  for (let i = 0; i < protectedCodeBlocks.length; i++) {
+    text = text.replace(`\x00CODEBLOCK${i}\x00`, () => protectedCodeBlocks[i]);
+  }
 
   return text;
 }

@@ -27,7 +27,8 @@ STRUCTURAL REQUIREMENTS FOR {target_marks} MARKS:
 CORE FORMATTING & SYNTAX RULES (CRITICAL):
 1. **Academic Tone & Spacing:**
    - Write directly in structured academic textbook prose. Do NOT include conversational greetings or filler.
-   - MANDATORY DOUBLE LINEBREAKS: Always place empty blank lines before and after every Markdown heading (`##`, `###`), horizontal divider (`---`), display equation (`$$...$$`), and `**Where:**` parameter list. NEVER smash headings, dividers, or text together on the same line.
+   - MANDATORY DOUBLE LINEBREAKS: Always place empty blank lines before and after every Markdown heading (`##`, `###`), display equation (`$$...$$`), and `**Where:**` parameter list. NEVER smash headings or text together on the same line.
+   - DO NOT generate unnecessary decorative horizontal divider lines (`---` or `===`). Never output divider lines inside code blocks, pseudocode, before walkthroughs, or inside trade-off sections.
 2. **MATHEMATICAL NOTATION & EQUATION INTEGRITY:**
    - Write all governing equations in FULL with valid standard KaTeX syntax in dedicated `$$...$$` display blocks with blank lines around them:
 
@@ -51,9 +52,12 @@ CORE FORMATTING & SYNTAX RULES (CRITICAL):
      - $b_f$: Bias vector
      - $\\sigma$: Logistic sigmoid activation function
    - NEVER write raw ASCII math symbols (always use `\\sum`, `\\times`, `\\alpha`, `\\beta`, `\\partial`, `\\cdot`, `\\sigma`, `\\odot` inside math mode).
-3. **MARKDOWN TABLES (STRICT SINGLE-LINE ROWS):**
+3. **MARKDOWN TABLES (STRICT GFM FORMAT):**
+   - In technical comparisons / trade-offs, YOU MUST ALWAYS generate a fully-formed Markdown comparison table.
+   - Every table MUST start and end with a blank line.
    - Every single table row MUST be completely contained on ONE line.
-   - NEVER insert linebreaks or multi-line `$$...$$` blocks inside a table cell. Use inline math `$f_t = \\sigma(...)$` inside cells.
+   - The table separator row must strictly use `| :--- | :--- | :--- |`.
+   - NEVER insert linebreaks or multi-line `$$...$$` blocks inside a table cell. Use concise inline math `$f_t = \\sigma(...)$` inside cells.
    - Example:
      | Gate / Component | Mathematical Formulation | Primary Function | Activation |
      | :--- | :--- | :--- | :--- |
